@@ -1,34 +1,56 @@
+# api/rag_pipeline.py
 import pandas as pd
-import psycopg2
 from sqlalchemy import create_engine
 import google.generativeai as genai
-import dotenv
 import os
 import json
+from contextlib import contextmanager
 
-# Load environment variables
-dotenv.load_dotenv()
-
-# Initialize PostgreSQL connection
-conn = psycopg2.connect(
-    dbname=os.getenv('DB_NAME'),
-    user=os.getenv('DB_USER'),
-    password=os.getenv('DB_PASSWORD'),
-    host=os.getenv('DB_HOST'),
-    port=os.getenv('DB_PORT')
-)
-engine = create_engine(
-    f"postgresql+psycopg2://{os.getenv('DB_USER')}:{os.getenv('DB_PASSWORD')}@{os.getenv('DB_HOST')}:{os.getenv('DB_PORT')}/{os.getenv('DB_NAME')}")
 
 # Initialize Gemini
-genai.configure(api_key=os.getenv('GEMINI_API_KEY'))
+def init_genai():
+    api_key = os.environ.get('GEMINI_API_KEY')
+    if not api_key:
+        raise ValueError("GEMINI_API_KEY environment variable not set")
+    genai.configure(api_key=api_key)
+
+
+# Create a new database connection for each request
+@contextmanager
+def get_db_connection():
+    # Get DB credentials from environment
+    db_params = {
+        'dbname': os.environ.get('DB_NAME'),
+        'user': os.environ.get('DB_USER'),
+        'password': os.environ.get('DB_PASSWORD'),
+        'host': os.environ.get('DB_HOST'),
+        'port': os.environ.get('DB_PORT')
+    }
+
+    # Validate DB credentials
+    for key, value in db_params.items():
+        if not value:
+            raise ValueError(f"{key} environment variable not set")
+
+    # Create a connection string
+    conn_string = f"postgresql+psycopg2://{db_params['user']}:{db_params['password']}@{db_params['host']}:{db_params['port']}/{db_params['dbname']}"
+
+    # Create a new connection
+    engine = create_engine(conn_string)
+    conn = engine.connect()
+
+    try:
+        yield conn, engine
+    finally:
+        conn.close()
+        engine.dispose()
 
 
 # Define SQL query function
 def sql_query(query: str):
     """Run a SQL SELECT query on the PostgreSQL database and return results."""
-    with engine.connect() as connection:
-        return pd.read_sql_query(query, connection).to_dict(orient='records')
+    with get_db_connection() as (conn, engine):
+        return pd.read_sql_query(query, conn).to_dict(orient='records')
 
 
 # Get database schema
@@ -42,7 +64,9 @@ def get_table_schema():
     where table_schema = 'public' and table_name = '{table_name}'
     order by ordinal_position;
     """
-    df = pd.read_sql(query, engine)
+    with get_db_connection() as (conn, engine):
+        df = pd.read_sql(query, conn)
+
     table_schema = {
         "table": table_name,
         "columns": [
@@ -55,6 +79,8 @@ def get_table_schema():
 
 # Initialize Gemini with system prompt and tools
 def initialize_gemini():
+    init_genai()  # Initialize Gemini API
+
     table_schema = get_table_schema()
     system_prompt = f"""
     You are an expert SQL analyst. When appropriate, generate SQL queries based on the user question and the database schema.
@@ -84,9 +110,3 @@ def process_prompt(prompt: str) -> str:
         return response
     except Exception as e:
         return f"Error processing prompt: {str(e)}"
-
-
-# Cleanup (optional, call when shutting down)
-def cleanup():
-    conn.close()
-    engine.dispose()

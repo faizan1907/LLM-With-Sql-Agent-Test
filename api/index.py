@@ -1,11 +1,12 @@
+# api/index.py (for Vercel)
 from flask import Flask, request, jsonify
-from rag_pipeline import process_prompt, cleanup
-import atexit
+from rag_pipeline import process_prompt
+from flask import Request
 
 app = Flask(__name__)
 
 
-@app.route('/query', methods=['POST'])
+@app.route('/api/query', methods=['POST'])
 def query_excel():
     # Check if request contains JSON data
     if not request.is_json:
@@ -26,8 +27,13 @@ def query_excel():
         return jsonify({"error": f"Error processing prompt: {str(e)}"}), 500
 
 
-# Cleanup database connections on shutdown
-atexit.register(cleanup)
-
+# For local development only
 if __name__ == '__main__':
-    app.run(host='0.0.0.0', port=8000, debug=False)
+    app.run()
+
+
+# No atexit.register needed for Vercel
+
+# Handler for Vercel
+def handler(request: Request):
+    return app(request)
