@@ -2,7 +2,6 @@
 from flask import Flask, request, jsonify
 import os
 import pandas as pd
-import psycopg2
 from sqlalchemy import create_engine
 import json
 from contextlib import contextmanager
