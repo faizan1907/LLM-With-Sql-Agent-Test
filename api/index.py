@@ -1,5 +1,5 @@
 from flask import Flask, request, jsonify
-from rag_pipeline import process_prompt  # Absolute import
+from api.rag_pipeline import process_prompt
 from flask import Request
 
 app = Flask(__name__)
