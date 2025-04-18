@@ -1,6 +1,5 @@
-# api/index.py (for Vercel)
 from flask import Flask, request, jsonify
-from rag_pipeline import process_prompt
+from rag_pipeline import process_prompt  # Absolute import
 from flask import Request
 
 app = Flask(__name__)
@@ -31,8 +30,6 @@ def query_excel():
 if __name__ == '__main__':
     app.run()
 
-
-# No atexit.register needed for Vercel
 
 # Handler for Vercel
 def handler(request: Request):
