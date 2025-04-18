@@ -1,7 +1,6 @@
-# requirements.txt
-pandas
-psycopg2-binary
-sqlalchemy
-google-generativeai
-python-dotenv
-flask
+Flask~=2.3.3
+pandas~=2.2.3
+google~=3.0.0
+dotenv~=0.9.9
+python-dotenv~=1.0.1
+SQLAlchemy~=2.0.40
