@@ -137,11 +137,6 @@ def home():
     return jsonify({"status": "API is running", "endpoints": ["/api/query"]}), 200
 
 
-# Handler for Vercel
-def handler(request):
-    return app(request)
-
-
 # For local development only
 if __name__ == '__main__':
     app.run(debug=True)
