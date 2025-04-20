@@ -1,8 +1,0 @@
-services:
-  - type: web
-    name: gemini-sql-api
-    env: python
-    region: oregon
-    buildCommand: pip install -r requirements.txt
-    startCommand: gunicorn index:app --bind 0.0.0.0:10000
-    plan: free
