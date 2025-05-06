@@ -10,6 +10,8 @@ import google.generativeai as genai
 from dotenv import load_dotenv
 import ast
 from typing import List
+import io
+import base64
 
 # Load environment variables from .env file
 load_dotenv()
@@ -36,7 +38,8 @@ def get_db_connection():
             "Database connection parameters (DB_NAME, DB_USER, DB_PASSWORD, DB_HOST, DB_PORT) must be set in "
             "environment variables.")
 
-    conn_string = f"postgresql+psycopg2://{db_params['user']}:{db_params['password']}@{db_params['host']}:{db_params['port']}/{db_params['dbname']}"
+    conn_string = (f"postgresql+psycopg2://{db_params['user']}:{db_params['password']}@{db_params['host']}:"
+                   f"{db_params['port']}/{db_params['dbname']}")
     engine = None
     conn = None
     try:
@@ -579,26 +582,54 @@ def process_prompt(prompt: str, target_tables: List[str]):
 
                 # (Report Generation Logic)
                 elif task_type == 'report':
-                    logger.info(f"    Generating report data...")
+                    logger.info(f"    Generating Excel report...")
                     try:
-                        columns = list(data[0].keys())
-                        report_data = {
-                            "columns": columns,
-                            "rows": data
-                        }
-                        logger.info(f"    [✓] Report data prepared")
-                        results.append({"type": "table", "data": report_data})  # Use "table" as the type
+                        # 'data' here is your list of dictionaries from sql_query
+                        if not data:  # Should have been caught above, but double-check
+                            logger.warning(f"    [!] No data to generate Excel report for '{task_description}'.")
+                            results.append(
+                                {"type": "text", "data": f"No data available to generate report: '{task_description}'"})
+                            continue
+
+                        df = pd.DataFrame(data)
+
+                        excel_buffer = io.BytesIO()
+                        # Use openpyxl engine, which is good for .xlsx
+                        df.to_excel(excel_buffer, index=False, sheet_name='ReportData', engine='openpyxl')
+                        excel_buffer.seek(0)  # Reset buffer's position to the beginning
+
+                        # Create a safe filename
+                        safe_filename_base = re.sub(r'[^\w\s-]', '',
+                                                    task_description).strip().replace(' ', '_')
+                        if not safe_filename_base:  # Handle empty after sanitization
+                            safe_filename_base = f"report_task_{i + 1}"
+                        filename = f"{safe_filename_base[:50]}.xlsx"  # Truncate for safety
+
+                        # Encode the Excel file to base64 to embed in JSON response
+                        excel_base64 = base64.b64encode(excel_buffer.getvalue()).decode('utf-8')
+
+                        logger.info(f"    [✓] Excel report '{filename}' prepared (base64 encoded).")
+                        results.append({
+                            "type": "excel_file",  # New type for frontend to handle
+                            "data": {
+                                "filename": filename,
+                                "content_base64": excel_base64,
+                                "mimetype": "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+                            }
+                        })
+
                     except Exception as report_err:
-                        logger.error(f"    [✗] Failed to format data for report: {report_err}", exc_info=True)
+                        logger.error(f"    [✗] Failed to generate Excel report"
+                                     f" for '{task_description}': {report_err}",
+                                     exc_info=True)
                         results.append({"type": "text",
-                                        "data": f"Error preparing report data for '{task_description}': {report_err}"})
+                                        "data": f"Error preparing Excel report for '{task_description}': {report_err}"})
 
                 else:
                     logger.warning(f"    [!] Unknown task type '{task_type}'")
                     results.append({"type": "text",
                                     "data": f"Unknown task type '{task_type}' encountered for sub-task"
-                                            f" '{task_description}'"
-                                            f". Cannot process."})
+                                            f" '{task_description}'. Cannot process."})
 
             except Exception as task_error:
                 logger.error(f"    [✗] Error processing task '{task_description}': {task_error}",

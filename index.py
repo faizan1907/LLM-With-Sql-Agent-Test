@@ -15,7 +15,14 @@ app = Flask(__name__)
 
 # The complex prompt previously used for testing in rag_pipeline.py
 TEST_PROMPT = """
-Generate 3-5 meaningful visualizations using bar and line graphs that would provide business insights, such as:\n- Comparison between estimated vs. actual profit percentages per project\n- Distribution of jobs by cost center (use count)\n- Change order value over time (sum of value per month)\n- Projects with the largest difference between estimated and actual costs (top 5)\n\nAlso, provide key insights on:\n- Which project managers are consistently delivering the highest profit margins? (Top 3)\n- Which cost centers are most profitable? (Top 3 based on average actual profit margin)\n- Are there patterns between job size (estimated cost) and profit margin? (Provide a general observation)
+Generate 3-5 meaningful visualizations using bar and line graphs that would provide business 
+insights, such as:\n- Comparison between estimated vs. actual profit percentages 
+per project\n- Distribution of jobs by cost center (use count)\n- Change order value
+ over time (sum of value per month)\n- Projects with the largest difference between 
+ estimated and actual costs (top 5)\n\nAlso, provide key insights on:\n- Which project managers are 
+ consistently delivering the highest profit margins? (Top 3)\n- Which cost centers are most profitable? (
+ Top 3 based on average actual profit margin)\n- Are there patterns between job size (estimated cost) and profit margin?
+  (Provide a general observation)
 """
 
 tables_to_use = [
@@ -68,7 +75,7 @@ def test_pipeline_endpoint():
     try:
         logger.info(f"Processing predefined test prompt...")
         # Use the hardcoded TEST_PROMPT
-        result = process_prompt(TEST_PROMPT)
+        result = process_prompt(TEST_PROMPT, None)
         logger.info("Successfully processed predefined test prompt via /api/test_pipeline")
         # Return the result
         return jsonify({"response": result}), 200
