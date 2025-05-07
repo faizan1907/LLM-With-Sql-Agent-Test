@@ -343,55 +343,61 @@ def process_prompt(prompt: str, target_tables: List[str]):
         sql_gemini = None
         plotly_gemini = None
         insight_gemini = None
+        title_gemini = None
 
         # --- MODIFIED SQL INSTRUCTION ---
         sql_instruction = f""" You are an expert PostgreSQL query writer. Generate a SINGLE, syntactically correct 
-        PostgreSQL SELECT query based ONLY on the schema provided and the task description.
+            PostgreSQL SELECT query based ONLY on the schema provided and the task description.
 
-        **=== DATABASE SCHEMA (Use ONLY this) ===**
-        {database_schema_json}
-        
-        **=== CRITICAL JOINING RULES ===**
-        
-        1.  **Primary Entity First:** Identify the main subject (e.g., employees, departments) and start the `FROM` 
-        clause with that table.
-        
-        2.  **`LEFT JOIN` for Completeness:** If the goal is to show *all* items from the primary entity (e.g., 
-        "list all departments and their employees"), ALWAYS use `LEFT JOIN` from the primary entity table to others. 
-        `INNER JOIN` is WRONG here as it loses primary entities without matches.
-        
-        3.  **`ON` CLAUSE MUST BE SIMPLE - THE MOST IMPORTANT RULE:** * **JOIN `ON` ONLY THE SINGLE PRIMARY/FOREIGN 
-        KEY PAIR.** * Example: `... FROM table_a JOIN table_b ON table_a.id = table_b.a_id ...` (This is CORRECT) * * 
-        **--- WARNING: DO NOT ADD MULTIPLE CONDITIONS IN `ON` ---** * **--- WARNING: DO NOT ADD CONDITIONS ON OTHER 
-        COLUMNS IN `ON` ---** * * **WRONG:** `ON table_a.id = table_b.a_id AND table_a.status = table_b.status` <== 
-        **ABSOLUTELY FORBIDDEN!** * **WRONG:** `ON table_a.id = table_b.a_id AND table_a.type = 'X'` <== **ABSOLUTELY 
-        FORBIDDEN!** * **WRONG:** `ON table_a.key1 = table_b.fkey1 AND table_a.key2 = table_b.fkey2` <== **FORBIDDEN! 
-        (Assume single key joins)** * * **RULE:** The `ON` clause connects tables based *solely* on their defined key 
-        relationship. Nothing else. * **ALL OTHER FILTERING BELONGS IN THE `WHERE` CLAUSE.** Apply `WHERE` conditions 
-        *after* all joins are complete.
-        
-        4.  **`INNER JOIN` Usage:** Use `INNER JOIN` ONLY if the request explicitly requires results where matches 
-        MUST exist in ALL joined tables.
-        
-        5.  **Schema Adherence:** Use ONLY the tables and columns provided in the schema section above. Do not invent 
-        tables or columns.
-        
-        **=== OTHER QUERY RULES ===**
-        - Use exact schema names. Use aliases (e.g., `d` for `departments`). Qualify columns (`d.name`).
-        - Handle potential division by zero: `NULLIF(denominator, 0)`.
-        - Quote identifiers only if needed (`"Table Name"."Column"`).
-        - Use `ORDER BY` if sorting is implied.
-        - Be careful with `WHERE` on the right side of `LEFT JOIN` (can act like `INNER JOIN`).
-        
-        **=== TASK ===**
-        Task Description: {{{{TASK_DESCRIPTION_PLACEHOLDER}}}}
-        Required Data Summary: {{{{REQUIRED_DATA_PLACEHOLDER}}}}
-        
-        **=== OUTPUT FORMAT ===**
-        - Raw SQL query ONLY.
-        - No explanations, comments, markdown (like ```sql).
-        """
-        # --- END MODIFIED SQL INSTRUCTION ---
+            **=== DATABASE SCHEMA (Use ONLY this) ===**
+            {database_schema_json}
+
+            **=== CRITICAL JOINING RULES ===**
+
+            1.  **Primary Entity First:** Identify the main subject (e.g., employees, departments) and start the `FROM` 
+            clause with that table.
+
+            2.  **`LEFT JOIN` for Completeness:** If the goal is to show *all* items from the primary entity (e.g., 
+            "list all departments and their employees"), ALWAYS use `LEFT JOIN` from the primary entity table to others. 
+            `INNER JOIN` is WRONG here as it loses primary entities without matches.
+
+            3.  **`ON` CLAUSE MUST BE SIMPLE - THE MOST IMPORTANT RULE:** * **JOIN `ON` ONLY THE SINGLE PRIMARY/FOREIGN 
+            KEY PAIR.** * Example: `... FROM table_a JOIN table_b ON table_a.id = table_b.a_id ...`
+             (This is CORRECT) * * **--- WARNING: DO NOT ADD MULTIPLE CONDITIONS IN `ON` ---** * **--- 
+             WARNING: DO NOT ADD CONDITIONS ON OTHER 
+            COLUMNS IN `ON` ---** * * **WRONG:** `ON table_a.id = table_b.a_id AND table_a.status = table_b.status` <== 
+            **ABSOLUTELY FORBIDDEN!**
+             * **WRONG:** `ON table_a.id = table_b.a_id AND table_a.type = 'X'` <== **ABSOLUTELY 
+            FORBIDDEN!**
+             * **WRONG:** `ON table_a.key1 = table_b.fkey1 AND table_a.key2 = table_b.fkey2` <== **FORBIDDEN! 
+            (Assume single key joins)** * * **RULE:** The `ON` clause connects tables based *solely*
+             on their defined key 
+            relationship. Nothing else. * **ALL OTHER FILTERING BELONGS IN THE `WHERE` CLAUSE.** Apply
+             `WHERE` conditions 
+            *after* all joins are complete.
+
+            4.  **`INNER JOIN` Usage:** Use `INNER JOIN` ONLY if the request explicitly requires results where matches 
+            MUST exist in ALL joined tables.
+
+            5.  **Schema Adherence:** Use ONLY the tables and columns provided in the schema section above.
+             Do not invent 
+            tables or columns.
+
+            **=== OTHER QUERY RULES ===**
+            - Use exact schema names. Use aliases (e.g., `d` for `departments`). Qualify columns (`d.name`).
+            - Handle potential division by zero: `NULLIF(denominator, 0)`.
+            - Quote identifiers only if needed (`"Table Name"."Column"`).
+            - Use `ORDER BY` if sorting is implied.
+            - Be careful with `WHERE` on the right side of `LEFT JOIN` (can act like `INNER JOIN`).
+
+            **=== TASK ===**
+            Task Description: {{{{TASK_DESCRIPTION_PLACEHOLDER}}}}
+            Required Data Summary: {{{{REQUIRED_DATA_PLACEHOLDER}}}}
+
+            **=== OUTPUT FORMAT ===**
+            - Raw SQL query ONLY.
+            - No explanations, comments, markdown (like ```sql).
+            """
 
         try:
             sql_gemini = initialize_gemini_model(system_instruction=sql_instruction, model_name="gemini-1.5-flash")
@@ -584,33 +590,77 @@ def process_prompt(prompt: str, target_tables: List[str]):
                 elif task_type == 'report':
                     logger.info(f"    Generating Excel report...")
                     try:
-                        # 'data' here is your list of dictionaries from sql_query
-                        if not data:  # Should have been caught above, but double-check
+                        if not data:
                             logger.warning(f"    [!] No data to generate Excel report for '{task_description}'.")
                             results.append(
                                 {"type": "text", "data": f"No data available to generate report: '{task_description}'"})
                             continue
 
                         df = pd.DataFrame(data)
-
                         excel_buffer = io.BytesIO()
-                        # Use openpyxl engine, which is good for .xlsx
                         df.to_excel(excel_buffer, index=False, sheet_name='ReportData', engine='openpyxl')
-                        excel_buffer.seek(0)  # Reset buffer's position to the beginning
+                        excel_buffer.seek(0)
 
-                        # Create a safe filename
-                        safe_filename_base = re.sub(r'[^\w\s-]', '',
-                                                    task_description).strip().replace(' ', '_')
-                        if not safe_filename_base:  # Handle empty after sanitization
+                        # MODIFICATION: Generate AI title for the filename
+                        ai_generated_title = task_description  # Fallback
+                        if title_gemini is None:
+                            title_instruction = """You are an expert at creating concise, descriptive titles for data
+                             reports.
+                                        Given a task description and optionally some of the data's column names
+                                        , generate a short (3-7 words) title suitable for a filename.
+                                        The title should accurately reflect the report's content. Use underscores
+                                         instead of spaces.
+                                        Output ONLY the title text. No extra formatting, explanations,
+                                         or quotation marks.
+                                        Example: If task is "Report of sales per region for Q1" and columns are
+                                         ['Region', 'TotalSales', 'Quarter'] -> "Q1_Sales_by_Region_Report"
+                                        Example: If task is "List active users and their last login" -> 
+                                        "Active_Users_Last_Login"
+                                        """
+                            try:
+                                title_gemini = initialize_gemini_model(model_name="gemini-1.5-flash",
+                                                                       # Or your preferred model
+                                                                       system_instruction=title_instruction)
+                                logger.debug("Title Gemini model initialized for reports.")
+                            except Exception as model_init_error:
+                                logger.error(f"   [✗] Failed to initialize Title Gemini model: {model_init_error}",
+                                             exc_info=True)
+
+                        if title_gemini:  # If successfully initialized (or re-initialized)
+                            title_prompt_parts = [f"Task Description:\n\"{task_description}\"\n"]
+                            if not df.empty:
+                                title_prompt_parts.append(f"Data Columns (first few):\n{list(df.columns)[:5]}\n")
+                            title_prompt_parts.append(
+                                "Generate a short, filename-friendly title (3-7 words, use underscores):")
+
+                            title_prompt = "".join(title_prompt_parts)
+
+                            title_chat = title_gemini.start_chat()
+                            title_response = title_chat.send_message(title_prompt)
+                            generated_title_text = clean_response_text(title_response.text)
+
+                            # Further ensure no spaces and limit length for safety before regex
+                            generated_title_text = generated_title_text.replace(' ', '_')[
+                                                   :100]  # Limit length before regex
+
+                            logger.info(
+                                f"    AI Generated Raw Title: {title_response.text}, Cleaned: {generated_title_text}")
+                            if generated_title_text:  # Check if AI returned something
+                                ai_generated_title = generated_title_text
+
+                        # MODIFICATION: Create a safe filename FROM THE AI TITLE (or fallback task_description)
+                        safe_filename_base = re.sub(r'[^\w-]', '',
+                                                    ai_generated_title).strip()
+                        if not safe_filename_base:
                             safe_filename_base = f"report_task_{i + 1}"
-                        filename = f"{safe_filename_base[:50]}.xlsx"  # Truncate for safety
 
-                        # Encode the Excel file to base64 to embed in JSON response
+                        filename = f"{safe_filename_base[:50]}.xlsx"  # Truncate for safety and add extension
+
                         excel_base64 = base64.b64encode(excel_buffer.getvalue()).decode('utf-8')
 
                         logger.info(f"    [✓] Excel report '{filename}' prepared (base64 encoded).")
                         results.append({
-                            "type": "excel_file",  # New type for frontend to handle
+                            "type": "excel_file",
                             "data": {
                                 "filename": filename,
                                 "content_base64": excel_base64,
@@ -619,8 +669,7 @@ def process_prompt(prompt: str, target_tables: List[str]):
                         })
 
                     except Exception as report_err:
-                        logger.error(f"    [✗] Failed to generate Excel report"
-                                     f" for '{task_description}': {report_err}",
+                        logger.error(f"    [✗] Failed to generate Excel report for '{task_description}': {report_err}",
                                      exc_info=True)
                         results.append({"type": "text",
                                         "data": f"Error preparing Excel report for '{task_description}': {report_err}"})
