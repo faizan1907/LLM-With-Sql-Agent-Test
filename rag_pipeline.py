@@ -347,81 +347,66 @@ def process_prompt(prompt: str, target_tables: List[str]):
 
         # --- MODIFIED SQL INSTRUCTION ---
         sql_instruction = f""" You are an expert PostgreSQL query writer. Generate a SINGLE, syntactically correct
-        PostgreSQL SELECT query based ONLY on the schema provided and the task description.
+PostgreSQL SELECT query based ONLY on the schema provided and the task description.
 
-        **=== DATABASE SCHEMA (Use ONLY this) ===**
-        {database_schema_json}
+**=== DATABASE SCHEMA (Use ONLY this) ===**
+{database_schema_json}
 
-        **=== CRITICAL JOINING RULES ===**
+**=== CRITICAL JOINING RULES ===**
 
-        1.  **Primary Entity First:** Identify the main subject (e.g., employees, departments) and start the `FROM`
-        clause with that table.
+1.  **Primary Entity First:** Identify the main subject (e.g., employees, departments) and start the `FROM`
+clause with that table.
 
-        2.  **`LEFT JOIN` for Completeness:** If the goal is to show *all* items from the primary entity (e.g.,
-        "list all departments and their employees"), ALWAYS use `LEFT JOIN` from the primary entity table to others.
-        `INNER JOIN` is WRONG here as it loses primary entities without matches. (BUT SEE MANDATORY NULL RULE BELOW WHICH MAY AFFECT THIS).
+2.  **`LEFT JOIN` for Completeness:** If the goal is to show *all* items from the primary entity (e.g.,
+"list all departments and their employees"), ALWAYS use `LEFT JOIN` from the primary entity table to others.
+`INNER JOIN` is WRONG here as it loses primary entities without matches. (BUT SEE MANDATORY NULL RULE BELOW WHICH MAY AFFECT THIS).
 
-        3.  **`ON` CLAUSE MUST BE SIMPLE - THE MOST IMPORTANT RULE:** * **JOIN `ON` ONLY THE SINGLE PRIMARY/FOREIGN
-        KEY PAIR.** * Example: `... FROM table_a JOIN table_b ON table_a.id = table_b.a_id ...`
-         (This is CORRECT) * * **--- WARNING: DO NOT ADD MULTIPLE CONDITIONS IN `ON` ---** * **---
-         WARNING: DO NOT ADD CONDITIONS ON OTHER
-        COLUMNS IN `ON` ---** * * **WRONG:** `ON table_a.id = table_b.a_id AND table_a.status = table_b.status` <==
-        **ABSOLUTELY FORBIDDEN!**
-         * **WRONG:** `ON table_a.id = table_b.a_id AND table_a.type = 'X'` <== **ABSOLUTELY
-        FORBIDDEN!**
-         * **WRONG:** `ON table_a.key1 = table_b.fkey1 AND table_a.key2 = table_b.fkey2` <== **FORBIDDEN!
-        (Assume single key joins)** * * **RULE:** The `ON` clause connects tables based *solely*
-         on their defined key
-        relationship. Nothing else. * **ALL OTHER FILTERING BELONGS IN THE `WHERE` CLAUSE.** Apply
-         `WHERE` conditions
-        *after* all joins are complete.
+3.  **`ON` CLAUSE MUST BE SIMPLE - THE MOST IMPORTANT RULE:** * **JOIN `ON` ONLY THE SINGLE PRIMARY/FOREIGN
+KEY PAIR.** * Example: `... FROM table_a JOIN table_b ON table_a.id = table_b.a_id ...`
+ (This is CORRECT) * * **--- WARNING: DO NOT ADD MULTIPLE CONDITIONS IN `ON` ---** * **---
+ WARNING: DO NOT ADD CONDITIONS ON OTHER
+COLUMNS IN `ON` ---** * * **WRONG:** `ON table_a.id = table_b.a_id AND table_a.status = table_b.status` <==
+**ABSOLUTELY FORBIDDEN!**
+ * **WRONG:** `ON table_a.id = table_b.a_id AND table_a.type = 'X'` <== **ABSOLUTELY
+FORBIDDEN!**
+ * **WRONG:** `ON table_a.key1 = table_b.fkey1 AND table_a.key2 = table_b.fkey2` <== **FORBIDDEN!
+(Assume single key joins)** * * **RULE:** The `ON` clause connects tables based *solely*
+ on their defined key
+relationship. Nothing else. * **ALL OTHER FILTERING BELONGS IN THE `WHERE` CLAUSE.** Apply
+ `WHERE` conditions
+*after* all joins are complete.
 
-        4.  **`INNER JOIN` Usage:** Use `INNER JOIN` ONLY if the request explicitly requires results where matches
-        MUST exist in ALL joined tables.
+4.  **`INNER JOIN` Usage:** Use `INNER JOIN` ONLY if the request explicitly requires results where matches
+MUST exist in ALL joined tables.
 
-        5.  **Schema Adherence:** Use ONLY the tables and columns provided in the schema section above.
-         Do not invent
-        tables or columns.
+5.  **Schema Adherence:** Use ONLY the tables and columns provided in the schema section above.
+ Do not invent
+tables or columns.
 
-        **=== OTHER QUERY RULES ===**
-        - Use exact schema names. Use aliases (e.g., `d` for `departments`). Qualify columns (`d.name`).
-        - Handle potential division by zero: `NULLIF(denominator, 0)`.
-        - Quote identifiers only if needed (`"Table Name"."Column"`).
-        - Use `ORDER BY` if sorting is implied.
-        - Be careful with `WHERE` on the right side of `LEFT JOIN` (can act like `INNER JOIN` even before the mandatory NULL rule).
+**=== OTHER QUERY RULES ===**
+- Use exact schema names. Use aliases (e.g., `d` for `departments`). Qualify columns (`d.name`).
+- Handle potential division by zero: `NULLIF(denominator, 0)`.
+- Quote identifiers only if needed (`"Table Name"."Column"`).
+- Use `ORDER BY` if sorting is implied.
+- Be careful with `WHERE` on the right side of `LEFT JOIN` (can act like `INNER JOIN` even before the mandatory NULL rule).
 
-        - **MANDATORY RULE: NO NULL VALUES IN OUTPUT OR KEY CRITERIA**
-            - **Strict `IS NOT NULL` Enforcement**: For EVERY column expression that will appear in the final `SELECT` list of the query, you MUST add a `WHERE` clause condition ensuring that the result of that expression `IS NOT NULL`.
-            - Additionally, for any column used in another `WHERE` clause condition (beyond the `IS NOT NULL` checks themselves) or in an `ORDER BY` clause, these columns (or the expressions they are part of) MUST also have an `IS NOT NULL` condition applied in the `WHERE` clause targeting their final/effective value.
-            - **Combine Conditions**: All these `IS NOT NULL` conditions must be combined using `AND` with any other existing `WHERE` clause conditions.
-            - **Example**: If the query intends to select `col_a` and `col_b`, and filter by `col_c = 'some_value'`, it MUST be transformed to effectively include: `SELECT col_a, col_b FROM my_table WHERE col_a IS NOT NULL AND col_b IS NOT NULL AND col_c IS NOT NULL AND col_c = 'some_value';` (assuming `col_c` itself isn't directly selected, its non-NULL status for filtering is also vital).
-            - **Impact on JOINs (Especially LEFT JOINs)**: If a `LEFT JOIN` is used, and columns/expressions selected from the right-joined table evaluate to `NULL` for some rows, those rows WILL BE EXCLUDED due to this rule. This is an intentional consequence and makes the query stricter.
-            - **No Exceptions (Unless Explicitly Overridden by Task)**: This `IS NOT NULL` enforcement is mandatory and must be applied universally UNLESS the original `Task Description` explicitly and specifically states "include NULL values for column_name" or "allow NULLs for column_name". In the absence of such an explicit override, all selected/referenced column expressions must result in non-NULL values.
-            - **Exclusion of Zeroes (Secondary Recommendation)**: For numerical columns that represent counts, amounts, or key measurements (e.g., sales, quantities), *consider* also adding conditions to exclude zero values (e.g., `relevant_column > 0`) IF the task specifically implies a focus on positive, non-zero data. However, the `IS NOT NULL` checks are the primary, mandatory requirement of this rule.
+- **MANDATORY RULE: NO NULL VALUES IN OUTPUT OR KEY CRITERIA**
+    - **Strict `IS NOT NULL` Enforcement**: For EVERY column that will appear in the final `SELECT` list of the query, you MUST add a `WHERE` clause condition ensuring that column `IS NOT NULL`.
+    - Additionally, for any column used in another `WHERE` clause condition (beyond the `IS NOT NULL` checks themselves) or in an `ORDER BY` clause, these columns MUST also have an `IS NOT NULL` condition applied in the `WHERE` clause.
+    - **Combine Conditions**: All these `IS NOT NULL` conditions must be combined using `AND` with any other existing `WHERE` clause conditions.
+    - **Example**: If the query is `SELECT col_a, col_b FROM my_table WHERE col_c = 'some_value';`, it MUST be transformed to effectively include: `SELECT col_a, col_b FROM my_table WHERE col_a IS NOT NULL AND col_b IS NOT NULL AND col_c IS NOT NULL AND col_c = 'some_value';` (Assuming col_c was not already covered by being in the SELECT list).
+    - **Impact on JOINs (Especially LEFT JOINs)**: If a `LEFT JOIN` is used, and columns selected from the right-joined table are `NULL` for some rows, those rows WILL BE EXCLUDED due to this rule. This is an intentional consequence and makes the query stricter. The `LEFT JOIN` might still be used to attempt to find a match, but rows with resulting `NULLs` in selected fields will be filtered out.
+    - **No Exceptions (Unless Explicitly Overridden by Task)**: This `IS NOT NULL` enforcement is mandatory for all specified columns (selected, used in WHERE/ORDER BY) and must be applied universally UNLESS the original `Task Description` explicitly and specifically states "include NULL values for column_name" or "allow NULLs for column_name". In the absence of such an explicit override in the Task Description, all selected/referenced columns must be non-NULL in the final output.
+    - **Exclusion of Zeroes (Secondary Recommendation)**: For numerical columns that represent counts, amounts, or key measurements (e.g., sales, quantities), *consider* also adding conditions to exclude zero values (e.g., `relevant_column > 0`) IF the task specifically implies a focus on positive, non-zero data. However, the `IS NOT NULL` checks are the primary, mandatory requirement of this rule.
 
-        - **MANDATORY RULE: TRANSFORM NEGATIVE PERCENTAGE VALUES**
-            - **Applicability**: This rule applies to columns identified as representing percentage values which are part of the final `SELECT` list.
-            - **Identification of Percentage Columns**:
-                - Examine column names for common indicators such as 'percent', 'pct', '%', 'rate', 'ratio', 'proportion', 'margin' (especially if the context or data type suggests a percentage).
-                - Refer to the `Task Description` and `Required Data Summary` for explicit mentions or clear implications that a column represents a percentage.
-                - If a column is the result of a calculation that definitionally yields a percentage (e.g., `(numerator_column / denominator_column) * 100.0`), it MUST be treated as a percentage column for this rule.
-            - **Transformation Logic**:
-                - If an identified percentage column (that is not NULL) contains a negative value (i.e., less than 0), that negative value MUST be replaced with the positive decimal value `0.00001` in the final query output.
-                - If the percentage value is zero or positive, it should be returned as is (subject to other rules like NULL checks).
-            - **SQL Implementation**: This transformation MUST be implemented directly in the `SELECT` clause using a `CASE` statement for each identified percentage column.
-                - Example: `SELECT ..., CASE WHEN original_percentage_column < 0 THEN 0.00001 ELSE original_percentage_column END AS aliased_percentage_column_name, ... FROM ...`
-                - The alias (`aliased_percentage_column_name`) should ideally be the original column name or the name expected in the output.
-            - **Mandatory Application**: This transformation is mandatory for all identified and selected percentage columns. It must be applied UNLESS the `Task Description` explicitly states "allow negative percentages for column_name" or "do not transform negative percentages for column_name". In the absence of such an override, all negative percentages in selected columns must be transformed to `0.00001`.
-            - **Interaction with NULLs**: This rule primarily addresses the transformation of non-NULL negative percentage values. The "MANDATORY RULE: NO NULL VALUES..." should separately ensure that the original percentage column (before this CASE statement) or the result of this CASE statement is not NULL in the final output, as per its own conditions. If `original_percentage_column` is `NULL`, the `CASE` expression will likely also yield `NULL` (unless `IS NULL` is explicitly handled within it, which is not the primary goal of *this* rule), and then the "NO NULL VALUES" rule would apply to that resulting `NULL`.
+**=== TASK ===**
+Task Description: {{{{TASK_DESCRIPTION_PLACEHOLDER}}}}
+Required Data Summary: {{{{REQUIRED_DATA_PLACEHOLDER}}}}
 
-        **=== TASK ===**
-        Task Description: {{{{TASK_DESCRIPTION_PLACEHOLDER}}}}
-        Required Data Summary: {{{{REQUIRED_DATA_PLACEHOLDER}}}}
-
-        **=== OUTPUT FORMAT ===**
-        - Raw SQL query ONLY.
-        - No explanations, comments, markdown (like ```sql).
-        """
+**=== OUTPUT FORMAT ===**
+- Raw SQL query ONLY.
+- No explanations, comments, markdown (like ```sql).
+"""
 
         try:
             sql_gemini = initialize_gemini_model(system_instruction=sql_instruction, model_name="gemini-1.5-flash")
