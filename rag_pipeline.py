@@ -1,7 +1,7 @@
 # rag_pipeline.py
 import os
 import pandas as pd
-from sqlalchemy import create_engine, text, inspect
+from sqlalchemy import create_engine, text  # Removed inspect as it's not needed for JSON schema
 import json
 from contextlib import contextmanager
 import re
@@ -9,7 +9,7 @@ import logging
 import google.generativeai as genai
 from dotenv import load_dotenv
 import ast
-from typing import List
+from typing import List, Dict, Any  # Added Dict, Any
 import io
 import base64
 
@@ -17,7 +17,7 @@ import base64
 load_dotenv()
 
 # Configure logging with a cleaner format for presentation
-log_format = '%(message)s'  # Remove timestamp for cleaner output
+log_format = '%(levelname)s: %(message)s'  # Added levelname for clarity
 logging.basicConfig(level=logging.INFO, format=log_format)
 logger = logging.getLogger(__name__)
 
@@ -44,8 +44,8 @@ def get_db_connection():
     conn = None
     try:
         logger.debug("Attempting to connect to the database.")
-        # Increase statement_timeout for potentially longer schema introspection
-        engine = create_engine(conn_string, connect_args={'options': '-c statement_timeout=30000'})  # 30 seconds
+        # Increase statement_timeout for potentially longer queries
+        engine = create_engine(conn_string, connect_args={'options': '-c statement_timeout=60000'})  # 60 seconds
         conn = engine.connect()
         logger.debug("Database connection successful.")
         yield conn, engine
@@ -61,15 +61,26 @@ def get_db_connection():
             logger.debug("Database engine disposed.")
 
 
-def sql_query(query: str):
+def sql_query_with_params(query: str, params: dict = None) -> List[Dict[str, Any]]:
     """
-    Runs a SQL SELECT query on the PostgreSQL database and returns results as a list of dictionaries.
+    Runs a SQL SELECT query on the PostgreSQL database with parameters
+    and returns results as a list of dictionaries.
+
+    Args:
+        query: The SQL query string, potentially with placeholders like :param_name.
+        params: A dictionary of parameters to bind to the query placeholders.
+
+    Returns:
+        A list of dictionaries representing the query results, or an empty list.
+
+    Raises:
+        Exception: If the database query fails.
     """
-    logger.debug(f"Executing SQL query: {query}")
+    logger.debug(f"Executing SQL query: {query} with params: {params}")
     try:
         with get_db_connection() as (conn, engine):
-            print(f"query: {query}")  # Keep this print for debugging generated SQL
-            result = pd.read_sql_query(text(query), conn)
+            # Use text() for the query and pass params directly to read_sql_query
+            result = pd.read_sql_query(text(query), conn, params=params)
             # Convert NaN/NaT to None for JSON compatibility
             result = result.where(pd.notnull(result), None)
             data = result.to_dict(orient='records')
@@ -82,69 +93,68 @@ def sql_query(query: str):
                 logger.debug("Query returned no data.")
             return data
     except Exception as e:
-        logger.error(f"❌ Error executing SQL query: {e}", exc_info=True)
+        logger.error(f"❌ Error executing parameterized SQL query: {e}", exc_info=True)
         # Optionally return an error structure instead of raising
-        # return {"error": f"SQL execution failed: {e}"}
+        # return [{"error": f"SQL execution failed: {e}"}]
         raise
 
 
-def get_database_schema(table_names_to_fetch: List[str]):
+# --- NEW SCHEMA RETRIEVAL FUNCTION ---
+def get_company_data_schema(company_id: int) -> str:
     """
-    Retrieves the schema (column names and types) for a specified list of tables.
+    Retrieves the 'data_schema' JSONB content for a specific company
+    from the 'company_data' table.
 
     Args:
-        table_names_to_fetch: A list of table names (strings) to get schemas for.
+        company_id: The identifier for the company whose schema is needed.
 
     Returns:
-        A JSON string representing the schemas of the requested tables,
-        or an error message string starting with "Error:" if a major failure occurs.
-        Returns "{}" if the input list is empty or none of the tables are found.
+        A JSON string representing the schema stored in the 'data_schema' column,
+        or an error message string starting with "Error:", or "{}" if not found/empty.
     """
-    if not table_names_to_fetch:
-        logger.warning("No table names provided to get_database_schema. Returning empty schema.")
-        return "{}"
+    logger.debug(f"Retrieving data_schema for company_id: {company_id}")
+    # Ensure company_id is treated as an integer in the query parameter
+    query = text("SELECT data_schema FROM company_data WHERE company_id = :company_id LIMIT 1")
+    schema_json = "{}"  # Default to empty JSON string
 
-    logger.debug(f"Retrieving schema for specified tables: {table_names_to_fetch}")
-    specified_schemas = {}
     try:
         with get_db_connection() as (conn, engine):
-            inspector = inspect(engine)
-            default_schema = inspector.default_schema_name  # Assuming tables are in the default schema
-            logger.debug(f"Inspecting schema: {default_schema}")
+            # Execute query with parameter binding
+            result = conn.execute(query, {'company_id': company_id}).fetchone()
 
-            found_tables_count = 0
-            for table_name in table_names_to_fetch:
-                try:
-                    # Check if table exists before trying to get columns
-                    if not inspector.has_table(table_name, schema=default_schema):
-                        logger.warning(f"[!] Requested table '{table_name}' not found in schema '{default_schema}'. "
-                                       f"Skipping.")
-                        continue  # Skip to the next table name in the list
+            if result and result[0]:
+                # The database driver (psycopg2) usually converts JSONB to Python dict/list automatically
+                schema_data = result[0]
+                if isinstance(schema_data, (dict, list)) and schema_data:  # Check if it's a non-empty dict/list
+                    schema_json = json.dumps(schema_data, indent=2)
+                    logger.debug(f"Schema retrieved successfully for company_id {company_id}.")
+                elif isinstance(schema_data, str):  # Handle if it comes back as string unexpectedly
+                    try:
+                        parsed_schema = json.loads(schema_data)
+                        if parsed_schema:
+                            schema_json = json.dumps(parsed_schema, indent=2)
+                            logger.debug(f"Schema retrieved (parsed from string) for company_id {company_id}.")
+                        else:
+                            logger.warning(
+                                f"Empty data_schema found (after parsing string) for company_id: {company_id}")
+                    except json.JSONDecodeError:
+                        logger.error(f"Invalid JSON string in data_schema for company_id: {company_id}")
+                        return f"Error: Invalid JSON found in data_schema for company_id {company_id}"
+                else:
+                    logger.warning(f"Empty or non-dict/list data_schema found for company_id: {company_id}")
 
-                    columns = inspector.get_columns(table_name, schema=default_schema)
-                    # Store schema as {column_name: type_string}
-                    specified_schemas[table_name] = {col['name']: str(col['type']) for col in columns}
-                    logger.debug(f"Schema retrieved for table '{table_name}'.")
-                    found_tables_count += 1
-                except Exception as e:
-                    logger.error(f"❌ Error retrieving columns for table '{table_name}': {e}", exc_info=False)
-                    specified_schemas[table_name] = {"error": f"Could not retrieve schema: {e}"}
-
-            if found_tables_count == 0:
-                logger.warning(
-                    f"None of the requested tables ({table_names_to_fetch}) were found. Returning empty schema.")
-                return "{}"
-
-            logger.debug(
-                f"Schema retrieval complete for specified tables. "
-                f"Found {found_tables_count}/{len(table_names_to_fetch)}.")
-            # Convert the dictionary of schemas to a JSON string
-            return json.dumps(specified_schemas, indent=2)
+            else:
+                logger.warning(f"No data_schema record found for company_id: {company_id}")
+                # Decide if this is an error or just means no schema available
+                # Returning an error might be safer if schema is expected
+                return f"Error: No data_schema found for company_id {company_id}"
 
     except Exception as e:
-        logger.error(f"❌ Error retrieving database schema for tables {table_names_to_fetch}: {e}", exc_info=True)
-        # Return a clear error message
-        return f"Error: Failed to retrieve database schema: {e}"
+        logger.error(f"❌ Error retrieving data_schema for company_id {company_id}: {e}", exc_info=True)
+        return f"Error: Failed to retrieve data schema: {e}"
+
+    # Return "{}" only if schema was explicitly empty, otherwise return the JSON string or error
+    return schema_json if schema_json != "{}" else "{}"
 
 
 def initialize_gemini_model(model_name="gemini-1.5-flash", system_instruction=None):
@@ -156,7 +166,7 @@ def initialize_gemini_model(model_name="gemini-1.5-flash", system_instruction=No
     genai.configure(api_key=api_key)
 
     generation_config = {
-        "temperature": 0.1,  # Lower temperature might help with consistency
+        "temperature": 0.1,
         "top_p": 0.95,
         "top_k": 64,
         "max_output_tokens": 8192,
@@ -188,9 +198,8 @@ def initialize_gemini_model(model_name="gemini-1.5-flash", system_instruction=No
 
 def clean_response_text(text):
     """Removes markdown code blocks and trims whitespace."""
-    # Remove ```sql, ```json, ```python etc.
-    text = re.sub(r'^```[a-zA-Z]*\n?', '', text, flags=re.MULTILINE)
-    text = re.sub(r'\n?```$', '', text, flags=re.MULTILINE)
+    # Remove ```sql, ```json, ```python etc. and the closing ```
+    text = re.sub(r'^```[a-zA-Z]*\s*|\s*```$', '', text, flags=re.MULTILINE)
     return text.strip()
 
 
@@ -200,15 +209,15 @@ def parse_tasks_response(response_text):
     Handles JSON null values by converting them to Python None.
     """
     try:
-        # First try ast.literal_eval after replacing null
-        python_compatible = response_text.replace('null', 'None')
+        # First try ast.literal_eval after replacing null/true/false
+        python_compatible = response_text.replace('null', 'None').replace('true', 'True').replace('false', 'False')
         tasks = ast.literal_eval(python_compatible)
         if not isinstance(tasks, list):
             raise ValueError("Decomposition did not return a list (evaluated by ast).")
         # Basic validation of task structure
         for task in tasks:
             if not isinstance(task, dict):
-                raise ValueError("Task item is not a dictionary.")
+                raise ValueError(f"Task item is not a dictionary: {task}")
             if 'task_type' not in task or 'description' not in task:
                 logger.warning(f"Task missing 'task_type' or 'description': {task}")
         return tasks
@@ -219,10 +228,10 @@ def parse_tasks_response(response_text):
             tasks = json.loads(response_text)
             if not isinstance(tasks, list):
                 raise ValueError("Decomposition did not return a list (evaluated by json).")
-            # Basic validation of task structure
+            # Basic validation of task structure (redundant but safe)
             for task in tasks:
                 if not isinstance(task, dict):
-                    raise ValueError("Task item is not a dictionary.")
+                    raise ValueError(f"Task item is not a dictionary: {task}")
                 if 'task_type' not in task or 'description' not in task:
                     logger.warning(f"Task missing 'task_type' or 'description': {task}")
             return tasks
@@ -230,88 +239,111 @@ def parse_tasks_response(response_text):
             logger.error(
                 f"Failed to parse task list. Raw response: '{response_text}'. AST error: {ast_error}. "
                 f"JSON error: {json_error}",
-                exc_info=True)
+                exc_info=False)  # Keep exc_info=False for cleaner logs unless debugging heavily
             raise ValueError(
-                f"Failed to parse task list. Check AI response format. AST: {ast_error}, JSON: {json_error}")
+                f"Failed to parse task list. Check AI response format. Raw response snippet: '{response_text[:200]}...'")
 
 
 # --- Core Processing Logic ---
-def process_prompt(prompt: str, target_tables: List[str]):
+# --- UPDATED process_prompt signature ---
+def process_prompt(prompt: str, company_id: int) -> List[Dict[str, Any]]:
     """
-    Processes a user prompt to generate insights, visualizations, or reports, using the schema
-    of a specified list of database tables.
+    Processes a user prompt against data in the 'company_data' table's JSONB columns
+    for a specific company.
 
     Args:
         prompt: The user's natural language request.
-        target_tables: A list of table names (strings) to consider for this request.
+        company_id: The ID of the company whose data should be analyzed.
+
+    Returns:
+        A list of result dictionaries, each containing 'type' and 'data'.
     """
-    # --- Step 1: Receive and Log Prompt & Target Tables ---
+    # --- Step 1: Receive and Log Prompt & Company ID ---
     logger.info("\n✨ STEP 1: PROCESSING USER PROMPT")
     logger.info(f"Received Prompt: \"{prompt}\"")
-    if not target_tables:
-        logger.error("❌ No target tables specified for processing.")
-        return [{"type": "text", "data": "Error: No target tables were specified for the analysis."}]
-    logger.info(f"Target Tables: {target_tables}")
+    if not isinstance(company_id, int) or company_id <= 0:
+        logger.error(f"❌ Invalid Company ID provided: {company_id}. Must be a positive integer.")
+        return [{"type": "text", "data": f"Error: Invalid Company ID ({company_id}). Please provide a valid ID."}]
+    logger.info(f"Target Company ID: {company_id}")
 
     results = []
 
     try:
-        # --- Step 2a: Get Schema for Specified Tables ---
-        logger.info("\n📜 STEP 2a: FETCHING SCHEMA FOR SPECIFIED TABLES")
-        database_schema_json_or_error = get_database_schema(target_tables)
+        # --- Step 2a: Get Schema ---
+        logger.info("\n📜 STEP 2a: FETCHING SCHEMA FROM company_data TABLE")
+        database_schema_json_or_error = get_company_data_schema(company_id)  # Use the new function
 
         if database_schema_json_or_error.startswith("Error:"):
             logger.error(f"❌ Schema retrieval failed: {database_schema_json_or_error}")
             return [{"type": "text", "data": f"Failed to proceed: {database_schema_json_or_error}"}]
 
+        if database_schema_json_or_error == "{}":
+            logger.warning(f"Retrieved empty schema for company_id {company_id}. Cannot proceed with analysis.")
+            return [{"type": "text",
+                     "data": f"Failed to proceed: The data schema for Company ID {company_id} is empty or could"
+                             f" not be properly retrieved."}]
+
         try:
+            # Validate if it's actually JSON (though get_company_data_schema should ensure this)
             schema_dict = json.loads(database_schema_json_or_error)
-            if not schema_dict:
-                logger.warning(
-                    f"Database schema is empty. None of the requested tables ({target_tables}) were found or "
-                    f"accessible.")
+            if not schema_dict:  # Double check if it's empty after parsing
+                logger.warning(f"Database schema parsed as empty for company ID {company_id}.")
                 return [{"type": "text",
-                         "data": f"Failed to proceed: None of the specified tables ({target_tables}) "
-                                 f"could be found or accessed."}]
+                         "data": f"Failed to proceed: Parsed data schema for Company ID {company_id} is empty."}]
         except json.JSONDecodeError:
             logger.error(f"❌ Failed to parse the retrieved schema JSON: {database_schema_json_or_error}")
             return [{"type": "text", "data": "Failed to proceed: Error parsing database schema information."}]
 
-        database_schema_json = database_schema_json_or_error
-        logger.info("[✓] Database schema retrieved for specified tables.")
+        database_schema_json = database_schema_json_or_error  # Use the validated JSON string
+        logger.info("[✓] Database schema retrieved and validated.")
 
-        logger.info("\n🧠 STEP 2b: DECOMPOSING PROMPT INTO TASKS (using provided schema)")
+        # --- Step 2b: Decompose Prompt into Tasks ---
+        logger.info("\n🧠 STEP 2b: DECOMPOSING PROMPT INTO TASKS (using JSON schema)")
 
-        decomposition_instruction = f""" Analyze the user's request and identify the specific data analysis tasks 
-        required. These tasks can be generating a textual insight, creating a visualization (bar or line graph), 
-        or generating a structured data report (table). Based ONLY on the database schema provided below (for the 
-        specified tables) and the user prompt, list the tasks. Consider if multiple tables FROM THIS LIST need to be 
-        combined (joined) to fulfill the request. Do not assume other tables exist.
+        # --- DECOMPOSITION INSTRUCTION (No changes needed here) ---
+        decomposition_instruction = f""" Analyze the user's request and identify the specific data analysis tasks
+         required (insight, visualization, report).
+        The data resides in a single table 'company_data' within a JSONB column named 'data'. You MUST filter by
+         company_id = {company_id}.
+        The structure of this 'data' column for the relevant company is described by the 'Data Schema' provided below.
+        The keys in the 'Data Schema' (e.g., "pms", "change_order") correspond to the keys within the 'data' JSONB
+         column, each holding an array of JSON objects.
 
-        Provided Database Schema (Only these tables are available):
+        Data Schema (Structure within the 'data' JSONB column of 'company_data' for company_id={company_id}):
         {database_schema_json}
 
         User Prompt:
         "{prompt}"
 
-        For each task, specify: 1.  'task_type': Either 'insight', 'visualization', or 'report'. Choose 'report' if 
-        the user asks for data listed in rows/columns, a table, or a structured list of items with specific 
-        attributes (like the example image showing PMs with metrics). 2.  'description': A brief description of what 
-        the task aims to achieve (e.g., "Generate report of jobs written and change order size per PM", "Visualize 
-        total cost per manager"). 3.  'required_data_summary': Briefly describe the data needed, mentioning the key 
-        columns and tables FROM THE PROVIDED SCHEMA needed to construct the insight, visualization, or report. 4.  
-        'visualization_type': If task_type is 'visualization', specify 'bar' or 'line'. Otherwise, null.
+        Based ONLY on this schema and the user prompt, list the tasks. Consider if data from DIFFERENT KEYS within the
+         'data' JSON (e.g., "pms" and "change_order") needs to be conceptually combined or related to fulfill
+          the request.
 
-        Output the result as a valid Python list of dictionaries ONLY. Do not include explanations or markdown. 
-        Example: [ {{"task_type": "report", "description": "Report showing number of jobs written and change order 
-        size for each project manager", "required_data_summary": "PM name, count of jobs written, sum/avg of change 
-        order size, potentially joined from jobs and managers tables (if both provided in schema)", 
-        "visualization_type": null}}, {{"task_type": "visualization", "description": "Total estimated vs. actual cost 
-        per project manager", "required_data_summary": "manager name, sum of estimated cost, sum of actual cost, 
-        joined from projects and managers tables (if both provided in schema)", "visualization_type": "bar"}}, 
-        {{"task_type": "insight", "description": "Which project had the biggest cost overrun percentage?", 
-        "required_data_summary": "project name, estimated cost, actual cost from projects table (if provided in 
-        schema)", "visualization_type": null}} ]"""
+        For each task, specify:
+        1.  'task_type': 'insight', 'visualization', or 'report'.
+        2.  'description': Brief description (e.g., "Report of change orders per project manager").
+        3.  'required_data_summary': Describe the data needed, mentioning the relevant KEYS (e.g., "pms",
+         "change_order") within the 'data' JSON and the specific FIELDS from the schema (e.g., "PM_Name from pms",
+          "Change Orders from change_order"). Mention if data from multiple keys needs to be related (e.g., 
+          "Relate pms.PM_Id
+           to change_order.Project_Manager").
+        4.  'visualization_type': 'bar' or 'line' if task_type is 'visualization', else null.
+
+        Output the result as a valid Python list of dictionaries ONLY. No explanations or markdown. Ensure keys and
+         values are double-quoted. Use null for missing values, not None.
+        Example:
+        [
+            {{"task_type": "report", "description": "Report linking PMs to their change orders",
+             "required_data_summary": "Need
+             PM_Name from 'pms' key and Job Number, Change Orders from 'change_order' key. Relate pms.PM_Id to
+              change_order.Project_Manager
+              using extracted fields.", "visualization_type": null}},
+            {{"task_type": "visualization", "description": "Total change orders per PM", "required_data_summary": "Need
+             PM_Name from 'pms' and Change Orders from 'change_order'. Aggregate Change Orders grouped by
+              PM after relating the keys.", "visualization_type": "bar"}}
+        ]
+        """
+        # --- End Decomposition Instruction ---
 
         decomposer_model = initialize_gemini_model()
         decomposer_chat = decomposer_model.start_chat()
@@ -325,18 +357,18 @@ def process_prompt(prompt: str, target_tables: List[str]):
             if not tasks:
                 logger.warning("AI task decomposition returned an empty list. No tasks to perform.")
                 return [{"type": "text",
-                         "data": f"I couldn't identify specific tasks from your request based on the provided "
-                                 f"tables ({target_tables}). Could you please rephrase or check the tables?"}]
+                         "data": f"I couldn't identify specific tasks from your request based on the"
+                                 f" available data structure for Company ID {company_id}. Could you please rephrase?"}]
 
             logger.info(f"🤖 AI identified {len(tasks)} tasks:")
             for idx, task_item in enumerate(tasks):
                 logger.info(
                     f"  • Task {idx + 1}: {task_item.get('description', 'N/A')} ({task_item.get('task_type', 'N/A')})")
         except (ValueError, TypeError) as e:
-            logger.error(f"❌ Failed to parse AI task decomposition: {e}", exc_info=True)
+            logger.error(f"❌ Failed to parse AI task decomposition: {e}", exc_info=False)
             return [{"type": "text",
-                     "data": f"Error: Could not understand the tasks required by the prompt. Please rephrase. ("
-                             f"Parsing error: {e})"}]
+                     "data": f"Error: Could not understand the tasks required by"
+                             f" the prompt. Please rephrase. (Parsing error: {e})"}]
 
         # --- Step 3: Process Each Task ---
         logger.info("\n⚙️ STEP 3: PROCESSING TASKS")
@@ -345,82 +377,83 @@ def process_prompt(prompt: str, target_tables: List[str]):
         insight_gemini = None
         title_gemini = None
 
-        # --- MODIFIED SQL INSTRUCTION ---
-        sql_instruction = f""" You are an expert PostgreSQL query writer. Generate a SINGLE, syntactically correct
-PostgreSQL SELECT query based ONLY on the schema provided and the task description.
+        # --- *** MODIFIED SQL INSTRUCTION (for JSONB querying - Field Access Fix) *** ---
+        sql_instruction = f""" You are an expert PostgreSQL query writer specializing in querying JSONB data.
+                Generate a SINGLE, syntactically correct PostgreSQL SELECT query to retrieve data based on the task.
 
-**=== DATABASE SCHEMA (Use ONLY this) ===**
-{database_schema_json}
+                **=== DATA SOURCE ===**
+                - All data comes from a single table: `company_data`.
+                - This table has a JSONB column named `data` which holds all the information.
+                - **CRITICAL:** You MUST filter rows using `WHERE company_id = :company_id`. The specific ID will 
+                be provided in the task details.
+                - The structure of the JSONB `data` column is defined by the schema provided below.
 
-**=== CRITICAL JOINING RULES ===**
+                **=== JSONB SCHEMA (Structure within the 'data' column for the relevant company) ===**
+                {database_schema_json}
+                * The top-level keys (e.g., "pms", "change_order") contain arrays of JSON objects.
 
-1.  **Primary Entity First:** Identify the main subject (e.g., employees, departments) and start the `FROM`
-clause with that table.
+                **=== QUERYING JSONB DATA ===**
+                - **Unnesting Arrays (CTEs):** Use `jsonb_array_elements(data -> 'key_name')` within a Common Table Expression
+                 (CTE) or subquery. Assign an alias to the unnested element (e.g., `elem`).
+                   Example CTE: `WITH pms_data AS (SELECT company_id, jsonb_array_elements(data -> 'pms') AS pms_elem FROM
+                     company_data WHERE company_id = :company_id)`
+                - **Accessing Fields:** Use the `->>` operator on the unnested element alias to extract fields as text (e.g.,
+                 `pms_elem ->> 'PM_Name'`).
+                - **Casting:** Cast extracted text values to appropriate PostgreSQL types (INTEGER, FLOAT, DATE, etc.) when needed. This is especially important for values used in JOIN conditions, WHERE clauses, or arithmetic operations.
+                  - For text fields representing integers:
+                    - **PREFERRED & SAFEST METHOD (use for IDs, counts, or any integer that might have a decimal in its string form like "123.0"): Cast to FLOAT first, then to INTEGER. This correctly handles and truncates decimals: `(elem ->> 'field_name')::FLOAT::INTEGER`. Example: `(elem ->> 'user_id')::FLOAT::INTEGER AS user_id_integer`.**
+                    - If, and ONLY IF, you are ABSOLUTELY CERTAIN that the string field is ALWAYS a clean integer (e.g., "123") and NEVER contains a decimal (e.g., NOT "123.0"), you *can* use a direct cast: `(elem ->> 'field_name')::INTEGER`. However, the FLOAT-first method is generally safer and should be preferred for IDs or counts.
+                - **Division by Zero:** Use `NULLIF(denominator, 0)` for safe division after casting operands to numeric types:
+                 `(elem ->> 'ValueA')::FLOAT / NULLIF((elem ->> 'ValueB')::FLOAT, 0)`.
+                - **Filtering:** Apply WHERE conditions *after* extracting and casting the field (e.g., `WHERE (co_elem ->>
+                 'Cost Center')::FLOAT::INTEGER = 2034`).
+                - **"Joining" Data from Different Keys:**
+                   1. Unnest BOTH arrays using `jsonb_array_elements` (preferably in separate CTEs, e.g., `pms_data`,
+                     `co_data`). Each CTE should select the unnested element (e.g., `pms_elem`, `co_elem`).
+                   2. Perform a standard SQL JOIN (INNER or LEFT) between the CTEs.
+                   3. **CRITICAL JOIN CONDITION:** Join `ON` the extracted and CASTED fields from the *unnested element aliases*. **Crucially, when joining on fields that represent IDs or other integer numbers, use the safer `::FLOAT::INTEGER` casting method (e.g., `(elem ->> 'id_field')::FLOAT::INTEGER`) to prevent errors if the string value contains a decimal (e.g., "123.0").** Example: `FROM pms_data JOIN co_data ON (pms_data.pms_elem ->> 'PM_Id')::FLOAT::INTEGER = (co_data.co_elem ->> 'Project_Manager_Id')::FLOAT::INTEGER`.
+                - **Final SELECT Clause:**
+                   - **CRITICAL:** Select fields by extracting them from the *unnested element aliases* from the relevant CTE used in the FROM clause.
+                   - Assign clear aliases to the selected fields using `AS`. Example: `SELECT (pms_data.pms_elem ->> 'PM_Name') AS project_manager_name, SUM((co_data.co_elem ->> 'Change Orders')::FLOAT) AS total_change_orders ...`
+                - **GROUP BY / ORDER BY Clause:**
+                   - **CRITICAL:** Use the *aliases assigned in the final SELECT clause* for grouping and ordering. Example: `... GROUP BY project_manager_name ORDER BY project_manager_name;` (Do NOT use `pms_data.pms_elem ->> 'PM_Name'` here).
+                - **Mandatory `company_id` Filter:** The `WHERE company_id = :company_id` clause MUST be present within each CTE that accesses the `company_data` table directly.
+                - **NULL Handling & Data Cleaning:**
+                   - **Strict `IS NOT NULL` Enforcement**: For EVERY field extracted and aliased in the final `SELECT` list, add a `WHERE` clause condition ensuring that extracted value `IS NOT NULL`. Example: `WHERE (pms_data.pms_elem ->> 'PM_Name') IS NOT NULL AND (co_data.co_elem ->> 'Change Orders') IS NOT NULL`. Apply these checks *after* joins.
+                   - Additionally, for any extracted field used in another `WHERE` clause condition (beyond `IS NOT NULL`) or in an `ORDER BY` clause, these fields MUST also have an `IS NOT NULL` condition applied in the `WHERE` clause.
+                   - Combine all `IS NOT NULL` conditions using `AND`.
+                   - **Empty String Check:** Also consider `AND (extracted_field) <> ''` for TEXT fields if needed.
+                   - **Zero Exclusion (Conditional):** Consider `AND (extracted_numeric_field)::FLOAT <> 0` if the task implies focus on non-zero data. `IS NOT NULL` is mandatory.
+                - **Aggregation:** Use standard SQL aggregate functions (SUM, AVG, COUNT, etc.) on extracted & casted fields. Apply `GROUP BY` using the *final SELECT aliases*.
 
-2.  **`LEFT JOIN` for Completeness:** If the goal is to show *all* items from the primary entity (e.g.,
-"list all departments and their employees"), ALWAYS use `LEFT JOIN` from the primary entity table to others.
-`INNER JOIN` is WRONG here as it loses primary entities without matches. (BUT SEE MANDATORY NULL RULE BELOW WHICH MAY AFFECT THIS).
+                **=== TASK ===**
+                Task Description: {{{{TASK_DESCRIPTION_PLACEHOLDER}}}}
+                Required Data Summary: {{{{REQUIRED_DATA_PLACEHOLDER}}}}
+                Company ID for Query: {{{{COMPANY_ID_PLACEHOLDER}}}} # This is the ID to use in the :company_id parameter
 
-3.  **`ON` CLAUSE MUST BE SIMPLE - THE MOST IMPORTANT RULE:** * **JOIN `ON` ONLY THE SINGLE PRIMARY/FOREIGN
-KEY PAIR.** * Example: `... FROM table_a JOIN table_b ON table_a.id = table_b.a_id ...`
- (This is CORRECT) * * **--- WARNING: DO NOT ADD MULTIPLE CONDITIONS IN `ON` ---** * **---
- WARNING: DO NOT ADD CONDITIONS ON OTHER
-COLUMNS IN `ON` ---** * * **WRONG:** `ON table_a.id = table_b.a_id AND table_a.status = table_b.status` <==
-**ABSOLUTELY FORBIDDEN!**
- * **WRONG:** `ON table_a.id = table_b.a_id AND table_a.type = 'X'` <== **ABSOLUTELY
-FORBIDDEN!**
- * **WRONG:** `ON table_a.key1 = table_b.fkey1 AND table_a.key2 = table_b.fkey2` <== **FORBIDDEN!
-(Assume single key joins)** * * **RULE:** The `ON` clause connects tables based *solely*
- on their defined key
-relationship. Nothing else. * **ALL OTHER FILTERING BELONGS IN THE `WHERE` CLAUSE.** Apply
- `WHERE` conditions
-*after* all joins are complete.
-
-4.  **`INNER JOIN` Usage:** Use `INNER JOIN` ONLY if the request explicitly requires results where matches
-MUST exist in ALL joined tables.
-
-5.  **Schema Adherence:** Use ONLY the tables and columns provided in the schema section above.
- Do not invent
-tables or columns.
-
-**=== OTHER QUERY RULES ===**
-- Use exact schema names. Use aliases (e.g., `d` for `departments`). Qualify columns (`d.name`).
-- Handle potential division by zero: `NULLIF(denominator, 0)`.
-- Quote identifiers only if needed (`"Table Name"."Column"`).
-- Use `ORDER BY` if sorting is implied.
-- Be careful with `WHERE` on the right side of `LEFT JOIN` (can act like `INNER JOIN` even before the mandatory NULL rule).
-
-- **MANDATORY RULE: NO NULL VALUES IN OUTPUT OR KEY CRITERIA**
-    - **Strict `IS NOT NULL` Enforcement**: For EVERY column that will appear in the final `SELECT` list of the query, you MUST add a `WHERE` clause condition ensuring that column `IS NOT NULL`.
-    - Additionally, for any column used in another `WHERE` clause condition (beyond the `IS NOT NULL` checks themselves) or in an `ORDER BY` clause, these columns MUST also have an `IS NOT NULL` condition applied in the `WHERE` clause.
-    - **Combine Conditions**: All these `IS NOT NULL` conditions must be combined using `AND` with any other existing `WHERE` clause conditions.
-    - **Example**: If the query is `SELECT col_a, col_b FROM my_table WHERE col_c = 'some_value';`, it MUST be transformed to effectively include: `SELECT col_a, col_b FROM my_table WHERE col_a IS NOT NULL AND col_b IS NOT NULL AND col_c IS NOT NULL AND col_c = 'some_value';` (Assuming col_c was not already covered by being in the SELECT list).
-    - **Impact on JOINs (Especially LEFT JOINs)**: If a `LEFT JOIN` is used, and columns selected from the right-joined table are `NULL` for some rows, those rows WILL BE EXCLUDED due to this rule. This is an intentional consequence and makes the query stricter. The `LEFT JOIN` might still be used to attempt to find a match, but rows with resulting `NULLs` in selected fields will be filtered out.
-    - **No Exceptions (Unless Explicitly Overridden by Task)**: This `IS NOT NULL` enforcement is mandatory for all specified columns (selected, used in WHERE/ORDER BY) and must be applied universally UNLESS the original `Task Description` explicitly and specifically states "include NULL values for column_name" or "allow NULLs for column_name". In the absence of such an explicit override in the Task Description, all selected/referenced columns must be non-NULL in the final output.
-    - **Exclusion of Zeroes (Secondary Recommendation)**: For numerical columns that represent counts, amounts, or key measurements (e.g., sales, quantities), *consider* also adding conditions to exclude zero values (e.g., `relevant_column > 0`) IF the task specifically implies a focus on positive, non-zero data. However, the `IS NOT NULL` checks are the primary, mandatory requirement of this rule.
-
-**=== TASK ===**
-Task Description: {{{{TASK_DESCRIPTION_PLACEHOLDER}}}}
-Required Data Summary: {{{{REQUIRED_DATA_PLACEHOLDER}}}}
-
-**=== OUTPUT FORMAT ===**
-- Raw SQL query ONLY.
-- No explanations, comments, markdown (like ```sql).
-"""
+                **=== OUTPUT FORMAT ===**
+                - Raw PostgreSQL query ONLY.
+                - **MUST** include the placeholder `:company_id` for filtering the `company_data` table within the CTEs.
+                - No explanations, comments, markdown (like ```sql).
+                """
+        # --- *** End Modified SQL Instruction *** ---
 
         try:
-            sql_gemini = initialize_gemini_model(system_instruction=sql_instruction, model_name="gemini-1.5-flash")
-            logger.debug("SQL Gemini model initialized.")
+            # Initialize SQL model with the new system instruction
+            sql_gemini = initialize_gemini_model(system_instruction=sql_instruction,
+                                                 model_name="gemini-1.5-flash")  # Or a more powerful model if needed
+            logger.debug("SQL Gemini model initialized for JSONB querying.")
         except Exception as model_init_error:
             logger.error(f"❌ Failed to initialize SQL Gemini model: {model_init_error}", exc_info=True)
             return [{"type": "text",
                      "data": f"Error: Failed to initialize the SQL generation component. {model_init_error}"}]
 
+        # --- Loop Through Tasks ---
         for i, task in enumerate(tasks):
             task_description = task.get('description', f'Unnamed Task {i + 1}')
             task_type = task.get('task_type')
             required_data = task.get('required_data_summary', 'No data summary provided')
-            viz_type = task.get('visualization_type')  # Will be None if not visualization
+            viz_type = task.get('visualization_type')
 
             logger.info(f"\n  Task {i + 1}/{len(tasks)}: '{task_description}' ({task_type})")
 
@@ -433,54 +466,68 @@ Required Data Summary: {{{{REQUIRED_DATA_PLACEHOLDER}}}}
 
             try:
                 # --- Step 3a: Generate SQL Query using AI ---
-                logger.info(f"    Generating SQL...")
-                if sql_gemini is None:
+                logger.info(f"    Generating SQL for JSONB...")
+                if sql_gemini is None:  # Should not happen if initialization succeeded
                     logger.error("   [✗] SQL Gemini model not initialized!")
                     results.append({"type": "text",
-                                    "data": f"Error processing task '{task_description}': SQL generation component "
-                                            f"not ready."})
+                                    "data": f"Error processing task '{task_description}': SQL generation component not ready."})
                     continue
 
-                sql_prompt = (f"Task Description: {task_description}\nRequired Data Summary: {required_data}\nGenerate "
-                              f"the PostgreSQL query using ONLY the provided schema and adhering strictly to the JOIN "
-                              f"strategy and other rules.")
+                # --- Construct the specific prompt for this task ---
+                sql_prompt = (f"Task Description: {task_description}\n"
+                              f"Required Data Summary: {required_data}\n"
+                              f"Company ID for Query: {company_id}\n"  # Inject the actual company_id
+                              f"Generate the PostgreSQL query using ONLY the provided schema and adhering strictly to the JSONB querying rules, including the :company_id parameter and correct field access in SELECT/GROUP BY/ORDER BY.")  # Added reminder
 
                 sql_chat = sql_gemini.start_chat()
                 sql_response = sql_chat.send_message(sql_prompt)
                 sql_query_text = clean_response_text(sql_response.text)
-                logger.debug(f"Generated SQL: {sql_query_text}")
+                logger.info(f"    Generated SQL:\n{sql_query_text}")  # Log the generated SQL
 
-                if not sql_query_text or not sql_query_text.lower().strip().startswith("select"):
-                    logger.warning(f"    [✗] Invalid or empty SQL query generated by AI: '{sql_query_text}'")
+                # --- Basic SQL Validation ---
+                stripped_sql = sql_query_text.lower().strip()
+                if not sql_query_text or not (stripped_sql.startswith("select") or stripped_sql.startswith("with")):
+                    logger.warning(
+                        f"    [✗] Invalid or empty SQL query generated by AI (must start with SELECT or WITH): '{sql_query_text}'")
                     results.append({"type": "text",
-                                    "data": f"Could not generate a valid SQL query for task: '{task_description}'. AI "
-                                            f"Output: '{sql_query_text}'"})
+                                    "data": f"Could not generate a valid SQL query (must start with SELECT or WITH) for task: '{task_description}'. AI Output: '{sql_query_text}'"})
                     continue
-                logger.info(f"    [✓] SQL query generated")
+
+                if ":company_id" not in sql_query_text:
+                    logger.warning(
+                        f"    [✗] Generated SQL query is missing the mandatory ':company_id' parameter: '{sql_query_text}'")
+                    results.append({"type": "text",
+                                    "data": f"Generated SQL query is invalid (missing ':company_id') for task: '{task_description}'. Cannot execute safely."})
+                    continue
+
+                logger.info(f"    [✓] SQL query generated and basic validation passed.")
 
                 # --- Step 3b: Fetch Data from Database ---
-                logger.info(f"    Fetching data...")
-                data = sql_query(sql_query_text)  # Returns list of dicts or empty list
+                logger.info(f"    Fetching data using JSONB query...")
+                # --- Use the new function with parameter binding ---
+                data = sql_query_with_params(sql_query_text, params={'company_id': company_id})
 
                 if not data:
-                    logger.info(f"    [!] Query returned no data")
+                    # It's possible the query is correct but returns no data matching criteria
+                    logger.info(f"    [!] Query executed successfully but returned no data.")
                     results.append({"type": "text",
-                                    "data": f"For '{task_description}': The query executed successfully but returned "
-                                            f"no data."})
+                                    "data": f"For '{task_description}': The query executed successfully but found no matching data for Company ID {company_id} based on the criteria."})
                     continue
                 else:
                     logger.info(f"    [✓] Fetched {len(data)} records")
 
                 # --- Step 3c: Generate Insight, Visualization, or Report ---
+                # (No changes needed in this section, it processes the fetched 'data')
+
                 # (Insight Generation Logic)
                 if task_type == 'insight':
                     logger.info(f"    Generating insight...")
                     if insight_gemini is None:
-                        insight_instruction = """You are an analyst. Based on the provided data (in JSON format) and 
-                        the original request, generate a concise textual insight. - Focus on answering the specific 
-                        question asked in the 'Original Request'. - Be factual and base your answer ONLY on the 
-                        provided data. - Keep the insight brief (1-3 sentences). - Output ONLY the insight text. No 
-                        extra formatting or greetings."""
+                        insight_instruction = """You are an analyst. Based on the provided data (in JSON format) and the original request, generate a concise textual insight.
+                        - Focus on answering the specific question asked in the 'Original Request'.
+                        - Be factual and base your answer ONLY on the provided data.
+                        - Keep the insight brief (1-3 sentences).
+                        - Output ONLY the insight text. No extra formatting or greetings."""
                         try:
                             insight_gemini = initialize_gemini_model(model_name="gemini-1.5-flash",
                                                                      system_instruction=insight_instruction)
@@ -489,17 +536,16 @@ Required Data Summary: {{{{REQUIRED_DATA_PLACEHOLDER}}}}
                             logger.error(f"   [✗] Failed to initialize Insight Gemini model: {model_init_error}",
                                          exc_info=True)
                             results.append({"type": "text",
-                                            "data": f"Error processing task '{task_description}': Insight generation "
-                                                    f"component failed to initialize."})
+                                            "data": f"Error processing task '{task_description}': Insight generation component failed to initialize."})
                             continue
 
                     insight_prompt = f"""
                     Data (JSON format):
                     {json.dumps(data, indent=2, default=str)}
-                    
+
                     Original Request for this Insight:
                     "{task_description}"
-                    
+
                     Generate the insight based *only* on the data provided:
                     """
                     insight_chat = insight_gemini.start_chat()
@@ -518,30 +564,38 @@ Required Data Summary: {{{{REQUIRED_DATA_PLACEHOLDER}}}}
                         logger.warning(
                             f"    [!] Invalid or missing visualization type '{viz_type}' specified for task.")
                         results.append({"type": "text",
-                                        "data": f"Skipping visualization for '{task_description}': Invalid or missing "
-                                                f"chart type ('{viz_type}'). Requires 'bar' or 'line'."})
+                                        "data": f"Skipping visualization for '{task_description}': Invalid or missing chart type ('{viz_type}'). Requires 'bar' or 'line'."})
                         continue
 
                     if plotly_gemini is None:
-                        plotly_instruction = f""" You are a data visualization expert using Plotly.js. Given a 
-                        dataset (as a JSON list of objects), a description of the desired visualization, 
-                        and the required chart type (bar or line), generate the Plotly JSON configuration (
-                        specifically the 'data' and 'layout' objects).
-                        
-                        Rules: - Create a meaningful title for the chart based on the description. Use the exact 
-                        column names from the dataset for 'x' and 'y' keys in the data trace. - Ensure the generated 
-                        JSON is syntactically correct and contains ONLY the 'data' (list) and 'layout' (object) keys 
-                        at the top level. - Map the data fields appropriately to x and y axes based on the 
-                        description and chart type ('bar' or 'line'). Infer appropriate axes from the data keys. - 
-                        Generate ALL necessary fields for a basic, valid Plotly chart (e.g., 'type', 'x', 
-                        'y' in trace; 'title' in layout). - ONLY output the JSON object starting with `{{` and ending 
-                        with `}}`. - Do not include any explanations, comments, code blocks (like ```json), 
-                        or other text.
-                        
-                        Example Output Format: {{ "data": [{{ "x": [/* array of x-values */], "y": [/* array of 
-                        y-values */], "type": "bar", "name": "Optional Trace Name" }}], "layout": {{ "title": "Chart 
-                        Title Based on Description", "xaxis": {{"title": "X-Axis Label"}}, "yaxis": {{"title": 
-                        "Y-Axis Label"}} }} }}"""
+                        plotly_instruction = f""" You are a data visualization expert using Plotly.js. Given a dataset (as a JSON list of objects), a description of the desired visualization, and the required chart type (bar or line), generate the Plotly JSON configuration (specifically the 'data' and 'layout' objects).
+
+                        Rules:
+                        - Create a meaningful title for the chart based on the description. Use the exact column names (keys) from the dataset for 'x' and 'y' keys in the data trace(s).
+                        - Ensure the generated JSON is syntactically correct and contains ONLY the 'data' (list) and 'layout' (object) keys at the top level.
+                        - Map the data fields appropriately to x and y axes based on the description and chart type ('bar' or 'line'). Infer appropriate axes labels from the data keys if not obvious.
+                        - Generate ALL necessary fields for a basic, valid Plotly chart (e.g., 'type', 'x', 'y' in trace; 'title' in layout). Add axis titles ('xaxis': {{"title": "X Label"}}, 'yaxis': {{"title": "Y Label"}}).
+                        - If multiple traces are needed (e.g., comparing two values per category), generate a list of trace objects within the 'data' list.
+                        - ONLY output the JSON object starting with `{{` and ending with `}}`.
+                        - Do not include any explanations, comments, code blocks (like ```json), or other text.
+
+                        Example Output Format:
+                        {{
+                          "data": [
+                            {{
+                              "x": [/* array of x-values */],
+                              "y": [/* array of y-values */],
+                              "type": "{viz_type}",
+                              "name": "Optional Trace Name"
+                            }}
+                           ],
+                          "layout": {{
+                            "title": "Chart Title Based on Description",
+                            "xaxis": {{"title": "X-Axis Label"}},
+                            "yaxis": {{"title": "Y-Axis Label"}}
+                          }}
+                        }}
+                        """
                         try:
                             plotly_gemini = initialize_gemini_model(system_instruction=plotly_instruction)
                             logger.debug("Plotly Gemini model initialized.")
@@ -549,21 +603,20 @@ Required Data Summary: {{{{REQUIRED_DATA_PLACEHOLDER}}}}
                             logger.error(f"   [✗] Failed to initialize Plotly Gemini model: {model_init_error}",
                                          exc_info=True)
                             results.append({"type": "text",
-                                            "data": f"Error processing task '{task_description}': Visualization "
-                                                    f"generation component failed to initialize."})
+                                            "data": f"Error processing task '{task_description}': Visualization generation component failed to initialize."})
                             continue
 
-                    data_keys = list(data[0].keys())  # data is guaranteed to exist here
+                    data_keys = list(data[0].keys()) if data else []  # Get keys from first record
                     plotly_prompt = f"""
                     Dataset (JSON format, keys available: {data_keys}):
                     {json.dumps(data, indent=2, default=str)}
-                    
+
                     Visualization Description:
                     "{task_description}"
-                    
+
                     Required Chart Type:
                     "{viz_type}"
-                    
+
                     Generate the Plotly JSON configuration ('data' and 'layout' objects only):
                     """
                     plotly_chat = plotly_gemini.start_chat()
@@ -573,8 +626,15 @@ Required Data Summary: {{{{REQUIRED_DATA_PLACEHOLDER}}}}
                     logger.debug(f"Cleaned Plotly JSON response: {plotly_json_text}")
 
                     try:
-                        if not plotly_json_text.startswith('{') or not plotly_json_text.endswith('}'):
-                            raise ValueError("Plotly response is not a valid JSON object string.")
+                        # More robust check for valid JSON object string
+                        if not (plotly_json_text.startswith('{') and plotly_json_text.endswith('}')):
+                            # Try removing potential leading/trailing garbage if simple cleaning failed
+                            match = re.search(r'\{.*\}', plotly_json_text, re.DOTALL)
+                            if match:
+                                plotly_json_text = match.group(0)
+                            else:
+                                raise ValueError("Plotly response is not a valid JSON object string.")
+
                         plotly_json = json.loads(plotly_json_text)
                         # Basic validation
                         if not isinstance(plotly_json,
@@ -585,21 +645,22 @@ Required Data Summary: {{{{REQUIRED_DATA_PLACEHOLDER}}}}
                             raise ValueError("Plotly 'data' key must be a list.")
                         if not isinstance(plotly_json['layout'], dict):
                             raise ValueError("Plotly 'layout' key must be an object.")
+                        # Optional: Deeper validation of trace structure if needed
 
                         logger.info(f"    [✓] Visualization ({viz_type}) generated")
                         results.append({"type": "graph", "data": plotly_json})
                     except (json.JSONDecodeError, ValueError) as e:
-                        logger.error(f"    [✗] Failed to parse or validate Plotly JSON: {e}", exc_info=True)
+                        logger.error(f"    [✗] Failed to parse or validate Plotly JSON: {e}",
+                                     exc_info=False)  # Keep exc_info=False
                         logger.error(f"    Problematic Plotly JSON text: {plotly_json_text}")
                         results.append({"type": "text",
-                                        "data": f"Error generating visualization for '{task_description}': Invalid "
-                                                f"Plotly configuration received from AI. Details: {e}"})
+                                        "data": f"Error generating visualization for '{task_description}': Invalid Plotly configuration received from AI. Details: {e}"})
 
                 # (Report Generation Logic)
                 elif task_type == 'report':
                     logger.info(f"    Generating Excel report...")
                     try:
-                        if not data:
+                        if not data:  # Should have been caught earlier, but double check
                             logger.warning(f"    [!] No data to generate Excel report for '{task_description}'.")
                             results.append(
                                 {"type": "text", "data": f"No data available to generate report: '{task_description}'"})
@@ -607,63 +668,60 @@ Required Data Summary: {{{{REQUIRED_DATA_PLACEHOLDER}}}}
 
                         df = pd.DataFrame(data)
                         excel_buffer = io.BytesIO()
+                        # Use a modern engine like openpyxl
                         df.to_excel(excel_buffer, index=False, sheet_name='ReportData', engine='openpyxl')
                         excel_buffer.seek(0)
 
-                        # MODIFICATION: Generate AI title for the filename
+                        # Generate AI title for the filename
                         ai_generated_title = task_description  # Fallback
                         if title_gemini is None:
-                            title_instruction = """You are an expert at creating concise, descriptive titles for data
-                             reports.
-                                        Given a task description and optionally some of the data's column names
-                                        , generate a short (3-7 words) title suitable for a filename.
-                                        The title should accurately reflect the report's content. Use underscores
-                                         instead of spaces.
-                                        Output ONLY the title text. No extra formatting, explanations,
-                                         or quotation marks.
-                                        Example: If task is "Report of sales per region for Q1" and columns are
-                                         ['Region', 'TotalSales', 'Quarter'] -> "Q1_Sales_by_Region_Report"
-                                        Example: If task is "List active users and their last login" -> 
-                                        "Active_Users_Last_Login"
+                            title_instruction = """You are an expert at creating concise, descriptive titles for data reports.
+                                        Given a task description and optionally some of the data's column names, generate a short (3-7 words) title suitable for a filename.
+                                        The title should accurately reflect the report's content. Use underscores instead of spaces.
+                                        Output ONLY the title text. No extra formatting, explanations, or quotation marks.
+                                        Example: If task is "Report of sales per region for Q1" -> "Q1_Sales_by_Region_Report"
+                                        Example: If task is "List active users and their last login" -> "Active_Users_Last_Login"
                                         """
                             try:
                                 title_gemini = initialize_gemini_model(model_name="gemini-1.5-flash",
-                                                                       # Or your preferred model
                                                                        system_instruction=title_instruction)
                                 logger.debug("Title Gemini model initialized for reports.")
                             except Exception as model_init_error:
                                 logger.error(f"   [✗] Failed to initialize Title Gemini model: {model_init_error}",
                                              exc_info=True)
+                                # Continue with fallback title
 
-                        if title_gemini:  # If successfully initialized (or re-initialized)
+                        if title_gemini:
                             title_prompt_parts = [f"Task Description:\n\"{task_description}\"\n"]
                             if not df.empty:
                                 title_prompt_parts.append(f"Data Columns (first few):\n{list(df.columns)[:5]}\n")
                             title_prompt_parts.append(
                                 "Generate a short, filename-friendly title (3-7 words, use underscores):")
-
                             title_prompt = "".join(title_prompt_parts)
 
-                            title_chat = title_gemini.start_chat()
-                            title_response = title_chat.send_message(title_prompt)
-                            generated_title_text = clean_response_text(title_response.text)
+                            try:
+                                title_chat = title_gemini.start_chat()
+                                title_response = title_chat.send_message(title_prompt)
+                                generated_title_text = clean_response_text(title_response.text)
+                                # Further clean/validate the title
+                                generated_title_text = generated_title_text.replace(' ', '_')[:100]  # Limit length
+                                if generated_title_text and re.match(r'^\w+$', generated_title_text.replace('_',
+                                                                                                            '')):  # Basic check for valid chars
+                                    ai_generated_title = generated_title_text
+                                    logger.info(f"    AI Generated Title: {ai_generated_title}")
+                                else:
+                                    logger.warning(
+                                        f"    AI generated title was invalid or empty ('{generated_title_text}'), using fallback.")
+                            except Exception as title_gen_error:
+                                logger.error(f"    Error generating title with AI: {title_gen_error}", exc_info=False)
+                                # Continue with fallback title
 
-                            # Further ensure no spaces and limit length for safety before regex
-                            generated_title_text = generated_title_text.replace(' ', '_')[
-                                                   :100]  # Limit length before regex
-
-                            logger.info(
-                                f"    AI Generated Raw Title: {title_response.text}, Cleaned: {generated_title_text}")
-                            if generated_title_text:  # Check if AI returned something
-                                ai_generated_title = generated_title_text
-
-                        # MODIFICATION: Create a safe filename FROM THE AI TITLE (or fallback task_description)
-                        safe_filename_base = re.sub(r'[^\w-]', '',
-                                                    ai_generated_title).strip()
+                        # Create a safe filename FROM THE AI TITLE (or fallback task_description)
+                        # Replace invalid chars, ensure it's not empty, truncate
+                        safe_filename_base = re.sub(r'[^\w-]', '_', ai_generated_title).strip('_')
                         if not safe_filename_base:
                             safe_filename_base = f"report_task_{i + 1}"
-
-                        filename = f"{safe_filename_base[:50]}.xlsx"  # Truncate for safety and add extension
+                        filename = f"{safe_filename_base[:50]}.xlsx"  # Truncate further for safety
 
                         excel_base64 = base64.b64encode(excel_buffer.getvalue()).decode('utf-8')
 
@@ -686,27 +744,36 @@ Required Data Summary: {{{{REQUIRED_DATA_PLACEHOLDER}}}}
                 else:
                     logger.warning(f"    [!] Unknown task type '{task_type}'")
                     results.append({"type": "text",
-                                    "data": f"Unknown task type '{task_type}' encountered for sub-task"
-                                            f" '{task_description}'. Cannot process."})
+                                    "data": f"Unknown task type '{task_type}' encountered for sub-task '{task_description}'. Cannot process."})
 
             except Exception as task_error:
-                logger.error(f"    [✗] Error processing task '{task_description}': {task_error}",
-                             exc_info=True)  # Keep exc_info for task errors
+                # Log the specific SQL query that failed if the error is likely SQL related
+                if isinstance(task_error, Exception) and 'database' in str(task_error).lower():
+                    logger.error(
+                        f"    [✗] Database error processing task '{task_description}'. Failed Query:\n{sql_query_text}\nError: {task_error}",
+                        exc_info=True)
+                else:
+                    logger.error(f"    [✗] Error processing task '{task_description}': {task_error}", exc_info=True)
+
                 results.append({"type": "text",
-                                "data": f"An error occurred while processing "
-                                        f"sub-task '{task_description}': {task_error}"})
+                                "data": f"An error occurred while processing sub-task '{task_description}': {task_error}"})
             # End of task processing try-except block
         # End of loop through tasks
 
     except Exception as e:
-        logger.error(f"❌ An unexpected error occurred during the main processing: {e}", exc_info=True)
-        results.append({"type": "text", "data": f"An unexpected error occurred: {e}"})
+        logger.error(f"❌ An unexpected error occurred during the main processing pipeline: {e}", exc_info=True)
+        # Append a generic error message to results if appropriate
+        results.append({"type": "text", "data": f"An unexpected error occurred during processing: {e}"})
     # End of main try-except block
 
     logger.info("\n🏁 PIPELINE EXECUTION COMPLETE")
     if results:
         logger.info(f"Returning {len(results)} result items.")
+        # Log types of results generated
+        result_types = [r.get('type', 'unknown') for r in results]
+        logger.info(f"Result types: {', '.join(result_types)}")
     else:
         logger.info("No results were generated.")
 
     return results
+

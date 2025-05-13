@@ -18,11 +18,11 @@ TEST_PROMPT = """
 Generate 3-5 meaningful visualizations using bar and line graphs that would provide business 
 insights, such as:\n- Comparison between estimated vs. actual profit percentages 
 per project\n- Distribution of jobs by cost center (use count)\n- Change order value
- over time (sum of value per month)\n- Projects with the largest difference between 
- estimated and actual costs (top 5)\n\nAlso, provide key insights on:\n- Which project managers are 
- consistently delivering the highest profit margins? (Top 3)\n- Which cost centers are most profitable? (
- Top 3 based on average actual profit margin)\n- Are there patterns between job size (estimated cost) and profit margin?
-  (Provide a general observation)
+over time (sum of value per month)\n- Projects with the largest difference between 
+estimated and actual costs (top 5)\n\nAlso, provide key insights on:\n- Which project managers are 
+consistently delivering the highest profit margins? (Top 3)\n- Which cost centers are most profitable? (
+Top 3 based on average actual profit margin)\n- Are there patterns between job size (estimated cost) and profit margin?
+(Provide a general observation)
 """
 
 tables_to_use = [
@@ -32,8 +32,6 @@ tables_to_use = [
     "estimator_analysis_change_orders",
     "estimator_analysis_jobs_completed"
 
-    # Example: Add a third table
-    # "non_existent_table" # Example: Test case for table not found
 ]
 
 
@@ -41,27 +39,26 @@ tables_to_use = [
 def query_pipeline():
     """Handles user queries sent via POST request."""
     logger.info("Received request to /api/query")
+
     if not request.is_json:
         logger.warning("Request is not JSON")
         return jsonify({"error": "Request must be JSON"}), 400
 
     data = request.get_json()
     prompt = data.get('prompt')
+    company_id = data.get('company_id')
 
     if not prompt:
         logger.warning("Missing prompt in request")
         return jsonify({"error": "Missing 'prompt' in request body"}), 400
 
     try:
-        logger.info(f"Processing prompt: {prompt[:100]}...")  # Log first 100 chars
-        # Call the main processing function from rag_pipeline
-        result = process_prompt(prompt, target_tables=tables_to_use)
+        logger.info(f"Processing prompt: {prompt[:100]}...")
+        result = process_prompt(prompt, company_id)
         logger.info("Successfully processed prompt via /api/query")
-        # The result from process_prompt is already the list structure
         return jsonify({"response": result}), 200
     except ValueError as ve:
         logger.error(f"Configuration error processing prompt: {str(ve)}", exc_info=True)
-        # Provide a more specific error message for configuration issues
         return jsonify({"error": f"Configuration error: {str(ve)}"}), 500
     except Exception as e:
         logger.error(f"Error processing prompt: {str(e)}", exc_info=True)
@@ -75,10 +72,12 @@ def test_pipeline_endpoint():
     try:
         logger.info(f"Processing predefined test prompt...")
         # Use the hardcoded TEST_PROMPT
-        result = process_prompt(TEST_PROMPT, None)
+        prompt = "Show me the total change orders for each project manager listed in pms."
+        company_id = 1
+        results = process_prompt(prompt, company_id)
         logger.info("Successfully processed predefined test prompt via /api/test_pipeline")
         # Return the result
-        return jsonify({"response": result}), 200
+        return jsonify({"response": results}), 200
     except ValueError as ve:
         logger.error(f"Configuration error during test run: {str(ve)}", exc_info=True)
         return jsonify({"error": f"Configuration error: {str(ve)}"}), 500
@@ -111,3 +110,4 @@ def health_check():
 if __name__ == '__main__':
     # Note: Use a production-ready server like Gunicorn or Waitress instead of Flask's built-in server for deployment.
     app.run(debug=True, host='0.0.0.0', port=5001)  # Running on port 5001 for clarity
+
