@@ -301,43 +301,47 @@ def process_prompt(prompt: str, company_id: int) -> List[Dict[str, Any]]:
         logger.info("\n🧠 STEP 2b: DECOMPOSING PROMPT INTO TASKS (using JSON schema)")
 
         # --- DECOMPOSITION INSTRUCTION (No changes needed here) ---
-        decomposition_instruction = f""" Analyze the user's request to identify the specific data analysis task(s) they are explicitly asking for (e.g., an insight, a visualization, a report).
-        The data resides in a single table 'company_data' within a JSONB column named 'data'. You MUST filter by
-         company_id = {company_id}.
-        The structure of this 'data' column for the relevant company is described by the 'Data Schema' provided below.
-        The keys in the 'Data Schema' (e.g., "pms", "change_order") correspond to the keys within the 'data' JSONB
-         column, each holding an array of JSON objects.
+        decomposition_instruction = f"""
+        Analyze the user's request: "{prompt}"
+        Based on this request and the Data Schema provided below, identify the specific data analysis or reporting tasks required to fulfill the user's objectives.
+
+        The data for these tasks resides in a single table 'company_data' within a JSONB column named 'data'. You MUST filter by company_id = {company_id}.
+        The structure of this 'data' column for the relevant company is described by the 'Data Schema'. The keys in the 'Data Schema' (e.g., "pms", "change_order") correspond to the top-level keys within the 'data' JSONB column, each holding an array of JSON objects.
 
         Data Schema (Structure within the 'data' JSONB column of 'company_data' for company_id={company_id}):
         {database_schema_json}
 
-        User Prompt:
-        "{prompt}"
+        **Guidelines for Defining Tasks:**
 
-        **CRITICAL ADHERENCE TO USER'S REQUESTED TASK TYPE:**
-        - If the User Prompt explicitly requests a specific task type (e.g., "generate a report", "create a bar chart", "show me an insight", "I need a visualization of..."), you **MUST** prioritize fulfilling that EXPLICIT request.
-        - Generate **ONLY** the task type(s) the user explicitly asks for.
-        - Avoid inferring or generating additional, unrequested task types (insight, visualization, report). For instance, if the user asks for "a report of sales activity," generate only a 'report' task. Do not generate a separate 'insight' task about sales trends or a 'visualization' task unless the user also explicitly requests those as distinct deliverables.
-        - If the user's prompt is ambiguous about the task type, you may then infer the most appropriate one, but explicit requests always take precedence and limit the scope.
+        1.  **Task Identification (Understand User Objectives):**
+            * First, carefully read the user's prompt ("{prompt}") to understand their primary goals or the questions they want answered.
+            * Identify each distinct objective. An objective might be a request for specific information, a comparison, a summary, a trend analysis, etc.
+            * Each distinct objective that can be addressed with the provided schema should correspond to a task.
+            * Consider if data from DIFFERENT KEYS within the JSONB 'data' column (e.g., "pms" and "change_order") needs to be conceptually combined or related to fulfill an objective.
 
-        Based ONLY on this schema, the user prompt, and the critical instructions above, list the task(s). Consider if data from DIFFERENT KEYS within the 'data' JSON (e.g., "pms" and "change_order") needs to be conceptually combined or related to fulfill the requested task(s).
+        2.  **Task Type Assignment (`task_type`) and Refinement:**
+            * For each objective identified in Step 1, assign a `task_type` as follows:
+            * **If the user explicitly requests a specific task type** for an objective (e.g., "generate a report for X", "create a chart of Y", "I need an insight about Z"):
+                * The `task_type` for that objective **MUST** be what the user specified.
+                * For such an explicitly typed request, generate **ONLY** that task for that specific objective. Do not generate alternative types (e.g., an insight if a report was asked for) for the *same objective*.
+            * **If the user does NOT explicitly state a task type** for an objective:
+                * Assign 'report' if the objective implies a need for structured data tables, lists, detailed itemizations, or comprehensive summaries.
+                * Assign 'visualization' if the objective implies a graphical representation of data (e.g., trends, comparisons, distributions). If so, also determine a `visualization_type` ('bar' or 'line').
+                * Assign 'insight' if the objective implies a need for a textual explanation of a key finding, pattern, anomaly, or a conclusion drawn from data analysis.
+            * **Multiple Objectives:** If the user's prompt contains multiple distinct objectives (e.g., "Give me a report on A and also show a chart for B"), create a separate task for each objective, applying these typing rules individually.
+
+        Based ONLY on the user prompt, the schema, and these guidelines, list the task(s).
 
         For each task, specify:
-        1.  'task_type': 'insight', 'visualization', or 'report'. This MUST align with the user's explicit request if one was made.
-        2.  'description': Brief description (e.g., "Report of change orders per project manager").
-        3.  'required_data_summary': Describe the data needed, mentioning the relevant KEYS (e.g., "pms",
-         "change_order") within the 'data' JSON and the specific FIELDS from the schema (e.g., "PM_Name from pms",
-          "Change Orders from change_order"). Mention if data from multiple keys needs to be related (e.g.,
-          "Relate pms.PM_Id
-           to change_order.Project_Manager").
-        4.  'visualization_type': 'bar' or 'line' if task_type is 'visualization', else null.
+        1.  'task_type': 'insight', 'visualization', or 'report' (determined by Guideline 2).
+        2.  'description': Brief description of the task's objective (e.g., "Report of change orders per project manager"). This should reflect the objective identified in Guideline 1.
+        3.  'required_data_summary': Describe the data needed to achieve the objective, mentioning the relevant JSON KEYS (e.g., "pms", "change_order") and the specific FIELDS from the schema (e.g., "PM_Name from pms", "Change Orders from change_order"). Clearly state if and how data from multiple keys needs to be related.
+        4.  'visualization_type': 'bar' or 'line' if `task_type` is 'visualization', else null.
 
-        Output the result as a valid Python list of dictionaries ONLY. No explanations or markdown. Ensure keys and
-         values are double-quoted. Use null for missing values, not None.
-        Example (this example shows the format; the number of tasks generated depends on the user's specific request and the critical instructions above):
+        Output the result as a valid Python list of dictionaries ONLY. No explanations or markdown. Ensure keys and values are double-quoted. Use null for missing values, not None.
+        Example (this example shows the format; the number and nature of tasks generated depend on the user's specific request and the guidelines above):
         [
-            {{"task_type": "report", "description": "Report linking PMs to their change orders",
-             "required_data_summary": "Need PM_Name from 'pms' key and Job Number, Change Orders from 'change_order' key. Relate pms.PM_Id to change_order.Project_Manager using extracted fields.", "visualization_type": null}},
+            {{"task_type": "report", "description": "Report linking PMs to their change orders", "required_data_summary": "Need PM_Name from 'pms' key and Job Number, Change Orders from 'change_order' key. Relate pms.PM_Id to change_order.Project_Manager using extracted fields.", "visualization_type": null}},
             {{"task_type": "visualization", "description": "Total change orders per PM", "required_data_summary": "Need PM_Name from 'pms' and Change Orders from 'change_order'. Aggregate Change Orders grouped by PM after relating the keys.", "visualization_type": "bar"}}
         ]
         """

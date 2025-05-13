@@ -380,7 +380,7 @@ def get_jsonb_data_summary(company_id=None):
 # --- Main Execution Block ---
 if __name__ == "__main__":
     excel_files_directory = './excel_files'
-    company_id = 1
+    company_id = 2  # Changed from 1 to 2 for new company data
 
     if not os.path.isdir(excel_files_directory):
         logger.error(f"Error: Directory not found: {excel_files_directory}")
