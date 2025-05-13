@@ -301,8 +301,7 @@ def process_prompt(prompt: str, company_id: int) -> List[Dict[str, Any]]:
         logger.info("\n🧠 STEP 2b: DECOMPOSING PROMPT INTO TASKS (using JSON schema)")
 
         # --- DECOMPOSITION INSTRUCTION (No changes needed here) ---
-        decomposition_instruction = f""" Analyze the user's request and identify the specific data analysis tasks
-         required (insight, visualization, report).
+        decomposition_instruction = f""" Analyze the user's request to identify the specific data analysis task(s) they are explicitly asking for (e.g., an insight, a visualization, a report).
         The data resides in a single table 'company_data' within a JSONB column named 'data'. You MUST filter by
          company_id = {company_id}.
         The structure of this 'data' column for the relevant company is described by the 'Data Schema' provided below.
@@ -315,32 +314,31 @@ def process_prompt(prompt: str, company_id: int) -> List[Dict[str, Any]]:
         User Prompt:
         "{prompt}"
 
-        Based ONLY on this schema and the user prompt, list the tasks. Consider if data from DIFFERENT KEYS within the
-         'data' JSON (e.g., "pms" and "change_order") needs to be conceptually combined or related to fulfill
-          the request.
+        **CRITICAL ADHERENCE TO USER'S REQUESTED TASK TYPE:**
+        - If the User Prompt explicitly requests a specific task type (e.g., "generate a report", "create a bar chart", "show me an insight", "I need a visualization of..."), you **MUST** prioritize fulfilling that EXPLICIT request.
+        - Generate **ONLY** the task type(s) the user explicitly asks for.
+        - Avoid inferring or generating additional, unrequested task types (insight, visualization, report). For instance, if the user asks for "a report of sales activity," generate only a 'report' task. Do not generate a separate 'insight' task about sales trends or a 'visualization' task unless the user also explicitly requests those as distinct deliverables.
+        - If the user's prompt is ambiguous about the task type, you may then infer the most appropriate one, but explicit requests always take precedence and limit the scope.
+
+        Based ONLY on this schema, the user prompt, and the critical instructions above, list the task(s). Consider if data from DIFFERENT KEYS within the 'data' JSON (e.g., "pms" and "change_order") needs to be conceptually combined or related to fulfill the requested task(s).
 
         For each task, specify:
-        1.  'task_type': 'insight', 'visualization', or 'report'.
+        1.  'task_type': 'insight', 'visualization', or 'report'. This MUST align with the user's explicit request if one was made.
         2.  'description': Brief description (e.g., "Report of change orders per project manager").
         3.  'required_data_summary': Describe the data needed, mentioning the relevant KEYS (e.g., "pms",
          "change_order") within the 'data' JSON and the specific FIELDS from the schema (e.g., "PM_Name from pms",
-          "Change Orders from change_order"). Mention if data from multiple keys needs to be related (e.g., 
+          "Change Orders from change_order"). Mention if data from multiple keys needs to be related (e.g.,
           "Relate pms.PM_Id
            to change_order.Project_Manager").
         4.  'visualization_type': 'bar' or 'line' if task_type is 'visualization', else null.
 
         Output the result as a valid Python list of dictionaries ONLY. No explanations or markdown. Ensure keys and
          values are double-quoted. Use null for missing values, not None.
-        Example:
+        Example (this example shows the format; the number of tasks generated depends on the user's specific request and the critical instructions above):
         [
             {{"task_type": "report", "description": "Report linking PMs to their change orders",
-             "required_data_summary": "Need
-             PM_Name from 'pms' key and Job Number, Change Orders from 'change_order' key. Relate pms.PM_Id to
-              change_order.Project_Manager
-              using extracted fields.", "visualization_type": null}},
-            {{"task_type": "visualization", "description": "Total change orders per PM", "required_data_summary": "Need
-             PM_Name from 'pms' and Change Orders from 'change_order'. Aggregate Change Orders grouped by
-              PM after relating the keys.", "visualization_type": "bar"}}
+             "required_data_summary": "Need PM_Name from 'pms' key and Job Number, Change Orders from 'change_order' key. Relate pms.PM_Id to change_order.Project_Manager using extracted fields.", "visualization_type": null}},
+            {{"task_type": "visualization", "description": "Total change orders per PM", "required_data_summary": "Need PM_Name from 'pms' and Change Orders from 'change_order'. Aggregate Change Orders grouped by PM after relating the keys.", "visualization_type": "bar"}}
         ]
         """
         # --- End Decomposition Instruction ---
