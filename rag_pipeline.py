@@ -302,49 +302,50 @@ def process_prompt(prompt: str, company_id: int) -> List[Dict[str, Any]]:
 
         # --- DECOMPOSITION INSTRUCTION (No changes needed here) ---
         decomposition_instruction = f"""
-        Analyze the user's request: "{prompt}"
-        Based on this request and the Data Schema provided below, identify the specific data analysis or reporting tasks required to fulfill the user's objectives.
+Analyze the user's request: "{prompt}"
+Based on this request and the Data Schema provided below, identify the specific data analysis or reporting tasks required to fulfill the user's objectives.
 
-        The data for these tasks resides in a single table 'company_data' within a JSONB column named 'data'. You MUST filter by company_id = {company_id}.
-        The structure of this 'data' column for the relevant company is described by the 'Data Schema'. The keys in the 'Data Schema' (e.g., "pms", "change_order") correspond to the top-level keys within the 'data' JSONB column, each holding an array of JSON objects.
+The data for these tasks resides in a single table 'company_data' within a JSONB column named 'data'. You MUST filter by company_id = {company_id}.
+The structure of this 'data' column for the relevant company is described by the 'Data Schema'. The keys in the 'Data Schema' (e.g., "pms", "change_order") correspond to the top-level keys within the 'data' JSONB column, each holding an array of JSON objects.
 
-        Data Schema (Structure within the 'data' JSONB column of 'company_data' for company_id={company_id}):
-        {database_schema_json}
+Data Schema (Structure within the 'data' JSONB column of 'company_data' for company_id={company_id}):
+{database_schema_json}
 
-        **Guidelines for Defining Tasks:**
+**Guidelines for Defining Tasks:**
 
-        1.  **Task Identification (Understand User Objectives):**
-            * First, carefully read the user's prompt ("{prompt}") to understand their primary goals or the questions they want answered.
-            * Identify each distinct objective. An objective might be a request for specific information, a comparison, a summary, a trend analysis, etc.
-            * Each distinct objective that can be addressed with the provided schema should correspond to a task.
-            * Consider if data from DIFFERENT KEYS within the JSONB 'data' column (e.g., "pms" and "change_order") needs to be conceptually combined or related to fulfill an objective.
+1.  **Task Identification (Understand User Objectives):**
+    * First, carefully read the user's prompt ("{prompt}") to understand their primary goals or the questions they want answered.
+    * Identify each distinct objective. An objective might be a request for specific information, a comparison, a summary, a trend analysis, etc.
+    * Each distinct objective that can be addressed with the provided schema should correspond to a task.
+    * Consider if data from DIFFERENT KEYS within the JSONB 'data' column (e.g., "pms" and "change_order") needs to be conceptually combined or related to fulfill an objective.
 
-        2.  **Task Type Assignment (`task_type`) and Refinement:**
-            * For each objective identified in Step 1, assign a `task_type` as follows:
-            * **If the user explicitly requests a specific task type** for an objective (e.g., "generate a report for X", "create a chart of Y", "I need an insight about Z"):
-                * The `task_type` for that objective **MUST** be what the user specified.
-                * For such an explicitly typed request, generate **ONLY** that task for that specific objective. Do not generate alternative types (e.g., an insight if a report was asked for) for the *same objective*.
-            * **If the user does NOT explicitly state a task type** for an objective:
-                * Assign 'report' if the objective implies a need for structured data tables, lists, detailed itemizations, or comprehensive summaries.
-                * Assign 'visualization' if the objective implies a graphical representation of data (e.g., trends, comparisons, distributions). If so, also determine a `visualization_type` ('bar' or 'line').
-                * Assign 'insight' if the objective implies a need for a textual explanation of a key finding, pattern, anomaly, or a conclusion drawn from data analysis.
-            * **Multiple Objectives:** If the user's prompt contains multiple distinct objectives (e.g., "Give me a report on A and also show a chart for B"), create a separate task for each objective, applying these typing rules individually.
+2.  **Task Type Assignment (`task_type`) and Refinement:**
+    * For each objective identified in Step 1, assign a `task_type` as follows:
+    * **If the user explicitly requests a specific task type** for an objective (e.g., "generate a report for X", "create a chart of Y", "I need an insight about Z"):
+        * The `task_type` for that objective **MUST** be what the user specified.
+        * For such an explicitly typed request, generate **ONLY** that task for that specific objective. Do not generate alternative types (e.g., an insight if a report was asked for) for the *same objective*.
+    * **If the user does NOT explicitly state a task type** for an objective, determine the most fitting type based on the nature of the information sought:
+        * **'insight':** Choose this if the objective is to understand *why* something is happening, to identify key takeaways, underlying patterns, significant trends (and their implications), anomalies, or to get a summarized interpretation or textual explanation that goes beyond just presenting raw data. User prompts like "What are the main drivers of sales?", "Explain the recent dip in performance.", "Are there any unusual activities?", "Summarize customer feedback trends.", "Why is X correlated with Y?", "What does the data suggest about Z?" often call for an 'insight'.
+        * **'report':** Choose this if the objective is primarily to see structured data, detailed listings, specific values, or straightforward aggregations without requiring significant interpretation or qualitative explanation. User prompts like "List all overdue projects.", "Show me the sales figures for each region.", "What is the total number of users active last month?", "Generate a summary table of X." typically call for a 'report'.
+        * **'visualization':** Choose this if the objective is best met by a graphical representation to see trends, compare values, understand distributions, or highlight relationships visually. User prompts like "Compare sales over the last year.", "Show me the distribution of customer ages.", "Plot X against Y." often call for a 'visualization'. If so, also determine a `visualization_type` ('bar' or 'line').
+        * **Decision Guidance:** When a prompt is somewhat ambiguous (e.g., "Tell me about X," "Analyze Y"), consider whether the core need is for raw/structured data ('report'), a visual representation ('visualization'), or an interpretation/explanation/conclusion ('insight'). If the user seems to be asking a "what," "why," or "so what" question that requires drawing conclusions from data, lean towards 'insight'.
+    * **Multiple Objectives:** If the user's prompt contains multiple distinct objectives (e.g., "Give me a report on A and also show a chart for B"), create a separate task for each objective, applying these typing rules individually.
 
-        Based ONLY on the user prompt, the schema, and these guidelines, list the task(s).
+Based ONLY on the user prompt, the schema, and these guidelines, list the task(s).
 
-        For each task, specify:
-        1.  'task_type': 'insight', 'visualization', or 'report' (determined by Guideline 2).
-        2.  'description': Brief description of the task's objective (e.g., "Report of change orders per project manager"). This should reflect the objective identified in Guideline 1.
-        3.  'required_data_summary': Describe the data needed to achieve the objective, mentioning the relevant JSON KEYS (e.g., "pms", "change_order") and the specific FIELDS from the schema (e.g., "PM_Name from pms", "Change Orders from change_order"). Clearly state if and how data from multiple keys needs to be related.
-        4.  'visualization_type': 'bar' or 'line' if `task_type` is 'visualization', else null.
+For each task, specify:
+1.  'task_type': 'insight', 'visualization', or 'report' (determined by Guideline 2).
+2.  'description': Brief description of the task's objective (e.g., "Report of change orders per project manager"). This should reflect the objective identified in Guideline 1.
+3.  'required_data_summary': Describe the data needed to achieve the objective, mentioning the relevant JSON KEYS (e.g., "pms", "change_order") and the specific FIELDS from the schema (e.g., "PM_Name from pms", "Change Orders from change_order"). Clearly state if and how data from multiple keys needs to be related.
+4.  'visualization_type': 'bar' or 'line' if `task_type` is 'visualization', else null.
 
-        Output the result as a valid Python list of dictionaries ONLY. No explanations or markdown. Ensure keys and values are double-quoted. Use null for missing values, not None.
-        Example (this example shows the format; the number and nature of tasks generated depend on the user's specific request and the guidelines above):
-        [
-            {{"task_type": "report", "description": "Report linking PMs to their change orders", "required_data_summary": "Need PM_Name from 'pms' key and Job Number, Change Orders from 'change_order' key. Relate pms.PM_Id to change_order.Project_Manager using extracted fields.", "visualization_type": null}},
-            {{"task_type": "visualization", "description": "Total change orders per PM", "required_data_summary": "Need PM_Name from 'pms' and Change Orders from 'change_order'. Aggregate Change Orders grouped by PM after relating the keys.", "visualization_type": "bar"}}
-        ]
-        """
+Output the result as a valid Python list of dictionaries ONLY. No explanations or markdown. Ensure keys and values are double-quoted. Use null for missing values, not None.
+Example (this example shows the format; the number and nature of tasks generated depend on the user's specific request and the guidelines above):
+[
+    {{"task_type": "report", "description": "Report linking PMs to their change orders", "required_data_summary": "Need PM_Name from 'pms' key and Job Number, Change Orders from 'change_order' key. Relate pms.PM_Id to change_order.Project_Manager using extracted fields.", "visualization_type": null}},
+    {{"task_type": "visualization", "description": "Total change orders per PM", "required_data_summary": "Need PM_Name from 'pms' and Change Orders from 'change_order'. Aggregate Change Orders grouped by PM after relating the keys.", "visualization_type": "bar"}}
+]
+"""
         # --- End Decomposition Instruction ---
 
         decomposer_model = initialize_gemini_model()
@@ -379,65 +380,93 @@ def process_prompt(prompt: str, company_id: int) -> List[Dict[str, Any]]:
         insight_gemini = None
         title_gemini = None
 
-        # --- *** MODIFIED SQL INSTRUCTION (for JSONB querying - Field Access Fix) *** ---
         sql_instruction = f""" You are an expert PostgreSQL query writer specializing in querying JSONB data.
-                Generate a SINGLE, syntactically correct PostgreSQL SELECT query to retrieve data based on the task.
+                        Generate a SINGLE, syntactically correct PostgreSQL SELECT query to retrieve data based on the task.
 
-                **=== DATA SOURCE ===**
-                - All data comes from a single table: `company_data`.
-                - This table has a JSONB column named `data` which holds all the information.
-                - **CRITICAL:** You MUST filter rows using `WHERE company_id = :company_id`. The specific ID will 
-                be provided in the task details.
-                - The structure of the JSONB `data` column is defined by the schema provided below.
+                        **=== DATA SOURCE ===**
+                        - All data comes from a single table: `company_data`.
+                        - This table has a JSONB column named `data` which holds all the information.
+                        - **CRITICAL:** You MUST filter rows using `WHERE company_id = :company_id`. The specific ID will 
+                        be provided in the task details.
+                        - The structure of the JSONB `data` column is defined by the schema provided below.
 
-                **=== JSONB SCHEMA (Structure within the 'data' column for the relevant company) ===**
-                {database_schema_json}
-                * The top-level keys (e.g., "pms", "change_order") contain arrays of JSON objects.
+                        **=== JSONB SCHEMA (Structure within the 'data' column for the relevant company) ===**
+                        {database_schema_json}
+                        * The top-level keys (e.g., "pms", "change_order") contain arrays of JSON objects.
 
-                **=== QUERYING JSONB DATA ===**
-                - **Unnesting Arrays (CTEs):** Use `jsonb_array_elements(data -> 'key_name')` within a Common Table Expression
-                 (CTE) or subquery. Assign an alias to the unnested element (e.g., `elem`).
-                   Example CTE: `WITH pms_data AS (SELECT company_id, jsonb_array_elements(data -> 'pms') AS pms_elem FROM
-                     company_data WHERE company_id = :company_id)`
-                - **Accessing Fields:** Use the `->>` operator on the unnested element alias to extract fields as text (e.g.,
-                 `pms_elem ->> 'PM_Name'`).
-                - **Casting:** Cast extracted text values to appropriate PostgreSQL types (INTEGER, FLOAT, DATE, etc.) when needed. This is especially important for values used in JOIN conditions, WHERE clauses, or arithmetic operations.
-                  - For text fields representing integers:
-                    - **PREFERRED & SAFEST METHOD (use for IDs, counts, or any integer that might have a decimal in its string form like "123.0"): Cast to FLOAT first, then to INTEGER. This correctly handles and truncates decimals: `(elem ->> 'field_name')::FLOAT::INTEGER`. Example: `(elem ->> 'user_id')::FLOAT::INTEGER AS user_id_integer`.**
-                    - If, and ONLY IF, you are ABSOLUTELY CERTAIN that the string field is ALWAYS a clean integer (e.g., "123") and NEVER contains a decimal (e.g., NOT "123.0"), you *can* use a direct cast: `(elem ->> 'field_name')::INTEGER`. However, the FLOAT-first method is generally safer and should be preferred for IDs or counts.
-                - **Division by Zero:** Use `NULLIF(denominator, 0)` for safe division after casting operands to numeric types:
-                 `(elem ->> 'ValueA')::FLOAT / NULLIF((elem ->> 'ValueB')::FLOAT, 0)`.
-                - **Filtering:** Apply WHERE conditions *after* extracting and casting the field (e.g., `WHERE (co_elem ->>
-                 'Cost Center')::FLOAT::INTEGER = 2034`).
-                - **"Joining" Data from Different Keys:**
-                   1. Unnest BOTH arrays using `jsonb_array_elements` (preferably in separate CTEs, e.g., `pms_data`,
-                     `co_data`). Each CTE should select the unnested element (e.g., `pms_elem`, `co_elem`).
-                   2. Perform a standard SQL JOIN (INNER or LEFT) between the CTEs.
-                   3. **CRITICAL JOIN CONDITION:** Join `ON` the extracted and CASTED fields from the *unnested element aliases*. **Crucially, when joining on fields that represent IDs or other integer numbers, use the safer `::FLOAT::INTEGER` casting method (e.g., `(elem ->> 'id_field')::FLOAT::INTEGER`) to prevent errors if the string value contains a decimal (e.g., "123.0").** Example: `FROM pms_data JOIN co_data ON (pms_data.pms_elem ->> 'PM_Id')::FLOAT::INTEGER = (co_data.co_elem ->> 'Project_Manager_Id')::FLOAT::INTEGER`.
-                - **Final SELECT Clause:**
-                   - **CRITICAL:** Select fields by extracting them from the *unnested element aliases* from the relevant CTE used in the FROM clause.
-                   - Assign clear aliases to the selected fields using `AS`. Example: `SELECT (pms_data.pms_elem ->> 'PM_Name') AS project_manager_name, SUM((co_data.co_elem ->> 'Change Orders')::FLOAT) AS total_change_orders ...`
-                - **GROUP BY / ORDER BY Clause:**
-                   - **CRITICAL:** Use the *aliases assigned in the final SELECT clause* for grouping and ordering. Example: `... GROUP BY project_manager_name ORDER BY project_manager_name;` (Do NOT use `pms_data.pms_elem ->> 'PM_Name'` here).
-                - **Mandatory `company_id` Filter:** The `WHERE company_id = :company_id` clause MUST be present within each CTE that accesses the `company_data` table directly.
-                - **NULL Handling & Data Cleaning:**
-                   - **Strict `IS NOT NULL` Enforcement**: For EVERY field extracted and aliased in the final `SELECT` list, add a `WHERE` clause condition ensuring that extracted value `IS NOT NULL`. Example: `WHERE (pms_data.pms_elem ->> 'PM_Name') IS NOT NULL AND (co_data.co_elem ->> 'Change Orders') IS NOT NULL`. Apply these checks *after* joins.
-                   - Additionally, for any extracted field used in another `WHERE` clause condition (beyond `IS NOT NULL`) or in an `ORDER BY` clause, these fields MUST also have an `IS NOT NULL` condition applied in the `WHERE` clause.
-                   - Combine all `IS NOT NULL` conditions using `AND`.
-                   - **Empty String Check:** Also consider `AND (extracted_field) <> ''` for TEXT fields if needed.
-                   - **Zero Exclusion (Conditional):** Consider `AND (extracted_numeric_field)::FLOAT <> 0` if the task implies focus on non-zero data. `IS NOT NULL` is mandatory.
-                - **Aggregation:** Use standard SQL aggregate functions (SUM, AVG, COUNT, etc.) on extracted & casted fields. Apply `GROUP BY` using the *final SELECT aliases*.
+                        **=== QUERYING JSONB DATA ===**
+                        - **MANDATORY: ALWAYS Unnest Arrays Using CTEs:** 
+                          * You MUST use Common Table Expressions (CTEs) to unnest JSONB arrays.
+                          * Direct unnesting in the main query or subqueries is NOT allowed.
+                          * For every JSONB array you need to access, create a dedicated CTE using this pattern:
+                            ```
+                            WITH array_data AS (
+                              SELECT company_id, jsonb_array_elements(data -> 'array_name') AS elem_alias
+                              FROM company_data 
+                              WHERE company_id = :company_id
+                            )
+                            ```
+                          * Example: `WITH pms_data AS (SELECT company_id, jsonb_array_elements(data -> 'pms') AS pms_elem FROM company_data WHERE company_id = :company_id)`
+                          * Multiple CTEs should be chained with commas: `WITH first_cte AS (...), second_cte AS (...)`
 
-                **=== TASK ===**
-                Task Description: {{{{TASK_DESCRIPTION_PLACEHOLDER}}}}
-                Required Data Summary: {{{{REQUIRED_DATA_PLACEHOLDER}}}}
-                Company ID for Query: {{{{COMPANY_ID_PLACEHOLDER}}}} # This is the ID to use in the :company_id parameter
+                        - **Accessing Fields:** Use the `->>` operator on the unnested element alias to extract fields as text (e.g.,
+                         `pms_elem ->> 'PM_Name'`).
 
-                **=== OUTPUT FORMAT ===**
-                - Raw PostgreSQL query ONLY.
-                - **MUST** include the placeholder `:company_id` for filtering the `company_data` table within the CTEs.
-                - No explanations, comments, markdown (like ```sql).
-                """
+                        - **Casting:** Cast extracted text values to appropriate PostgreSQL types (INTEGER, FLOAT, DATE, etc.) when needed. This is especially important for values used in JOIN conditions, WHERE clauses, or arithmetic operations.
+                          - For text fields representing integers:
+                            - **PREFERRED & SAFEST METHOD (use for IDs, counts, or any integer that might have a decimal in its string form like "123.0"): Cast to FLOAT first, then to INTEGER. This correctly handles and truncates decimals: `(elem ->> 'field_name')::FLOAT::INTEGER`. Example: `(elem ->> 'user_id')::FLOAT::INTEGER AS user_id_integer`.**
+                            - If, and ONLY IF, you are ABSOLUTELY CERTAIN that the string field is ALWAYS a clean integer (e.g., "123") and NEVER contains a decimal (e.g., NOT "123.0"), you *can* use a direct cast: `(elem ->> 'field_name')::INTEGER`. However, the FLOAT-first method is generally safer and should be preferred for IDs or counts.
+
+                        - **Division by Zero:** Use `NULLIF(denominator, 0)` for safe division after casting operands to numeric types:
+                         `(elem ->> 'ValueA')::FLOAT / NULLIF((elem ->> 'ValueB')::FLOAT, 0)`.
+
+                        - **Filtering:** Apply WHERE conditions *after* extracting and casting the field (e.g., `WHERE (co_elem ->>
+                         'Cost Center')::FLOAT::INTEGER = 2034`).
+
+                        - **MANDATORY: "Joining" Data from Different Keys:**
+                           1. ALWAYS unnest BOTH arrays using `jsonb_array_elements` in SEPARATE CTEs (e.g., `pms_data`,
+                             `co_data`). Each CTE should select the unnested element (e.g., `pms_elem`, `co_elem`).
+                           2. Perform a standard SQL JOIN (INNER or LEFT) between the CTEs.
+                           3. **CRITICAL JOIN CONDITION:** Join `ON` the extracted and CASTED fields from the *unnested element aliases*. **Crucially, when joining on fields that represent IDs or other integer numbers, use the safer `::FLOAT::INTEGER` casting method (e.g., `(elem ->> 'id_field')::FLOAT::INTEGER`) to prevent errors if the string value contains a decimal (e.g., "123.0").** Example: `FROM pms_data JOIN co_data ON (pms_data.pms_elem ->> 'PM_Id')::FLOAT::INTEGER = (co_data.co_elem ->> 'Project_Manager_Id')::FLOAT::INTEGER`.
+
+                        - **Final SELECT Clause:**
+                           - **CRITICAL:** Select fields by extracting them from the *unnested element aliases* from the relevant CTE used in the FROM clause.
+                           - Assign clear aliases to the selected fields using `AS`. Example: `SELECT (pms_data.pms_elem ->> 'PM_Name') AS project_manager_name, SUM((co_data.co_elem ->> 'Change Orders')::FLOAT) AS total_change_orders ...`
+
+                        - **GROUP BY / ORDER BY Clause:**
+                           - **CRITICAL:** Use the *aliases assigned in the final SELECT clause* for grouping and ordering. Example: `... GROUP BY project_manager_name ORDER BY project_manager_name;` (Do NOT use `pms_data.pms_elem ->> 'PM_Name'` here).
+
+                        - **Mandatory `company_id` Filter:** The `WHERE company_id = :company_id` clause MUST be present within each CTE that accesses the `company_data` table directly.
+
+                        - **NULL Handling & Data Cleaning:**
+                           - **Strict `IS NOT NULL` Enforcement**: For EVERY field extracted and aliased in the final `SELECT` list, add a `WHERE` clause condition ensuring that extracted value `IS NOT NULL`. Example: `WHERE (pms_data.pms_elem ->> 'PM_Name') IS NOT NULL AND (co_data.co_elem ->> 'Change Orders') IS NOT NULL`. Apply these checks *after* joins.
+                           - Additionally, for any extracted field used in another `WHERE` clause condition (beyond `IS NOT NULL`) or in an `ORDER BY` clause, these fields MUST also have an `IS NOT NULL` condition applied in the `WHERE` clause.
+                           - Combine all `IS NOT NULL` conditions using `AND`.
+                           - **Empty String Check:** Also consider `AND (extracted_field) <> ''` for TEXT fields if needed.
+                           - **Zero Exclusion (Conditional):** Consider `AND (extracted_numeric_field)::FLOAT <> 0` if the task implies focus on non-zero data. `IS NOT NULL` is mandatory.
+
+                        - **Aggregation:** Use standard SQL aggregate functions (SUM, AVG, COUNT, etc.) on extracted & casted fields. Apply `GROUP BY` using the *final SELECT aliases*.
+
+                        **=== QUERY STRUCTURE CHECKLIST (MANDATORY) ===**
+                        Your query MUST follow this structure:
+                        1. Start with WITH clause containing one or more CTEs for unnesting arrays
+                        2. Each CTE must filter on company_id = :company_id
+                        3. Main query should SELECT from the CTEs
+                        4. JOIN CTEs when accessing multiple arrays
+                        5. Apply proper IS NOT NULL conditions
+                        6. Use field aliases consistently
+
+                        **=== TASK ===**
+                        Task Description: {{{{TASK_DESCRIPTION_PLACEHOLDER}}}}
+                        Required Data Summary: {{{{REQUIRED_DATA_PLACEHOLDER}}}}
+                        Company ID for Query: {{{{COMPANY_ID_PLACEHOLDER}}}} # This is the ID to use in the :company_id parameter
+
+                        **=== OUTPUT FORMAT ===**
+                        - Raw PostgreSQL query ONLY.
+                        - **MUST** include the placeholder `:company_id` for filtering the `company_data` table within the CTEs.
+                        - No explanations, comments, markdown (like ```sql).
+                        - ALL queries MUST begin with a WITH clause that defines CTEs for unnesting arrays.
+                        """
         # --- *** End Modified SQL Instruction *** ---
 
         try:
@@ -778,4 +807,3 @@ def process_prompt(prompt: str, company_id: int) -> List[Dict[str, Any]]:
         logger.info("No results were generated.")
 
     return results
-
